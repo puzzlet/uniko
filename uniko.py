@@ -13,15 +13,18 @@ class Packet():
         self.message = message
         self.timestamp = timestamp if timestamp else time.time()
 
+    def __repr__(self):
+        return '<Packet %s %s %s>' % (self.target, self.message, repr(self.timestamp))
+
 class ConvertingBot(Bot):
-    def __init__(self, server_list, nickname, realname, reconnection_interval=60, channel_map=[], encoding_here='', encoding_there='', bot_there=None, use_ssl=False):
+    def __init__(self, server_list, nickname, realname, reconnection_interval=60, channels=[], channel_map={}, encoding_here='', encoding_there='', bot_there=None, use_ssl=False):
         Bot.__init__(self, server_list, nickname, realname, reconnection_interval)
         self.encoding_here = encoding_here
         self.encoding_there = encoding_there
         self.bot_there = bot_there
-        self.channel_map = channel_map
+        self.autojoin_channels = list(channels)
+        self.channel_map = dict(channel_map)
         self.use_ssl = use_ssl
-        self.autojoin_channels = []
         for channel in self.channel_map.keys():
             if type(channel) == unicode:
                 channel = channel.encode(self.encoding_here, 'ignore')
@@ -29,10 +32,9 @@ class ConvertingBot(Bot):
 
         self.buffer = []
         self.root_user = []
-        
         self.handlers = {
             'auth':  [self._cmd_auth],
-                        }
+        }
 
         #XXX: should be not initialized until other side is up
         self.initialized = False
@@ -79,7 +81,7 @@ class ConvertingBot(Bot):
         if self.initialized:    return
         if c != self.connection:    return
         self.ircobj.execute_delayed(0, self.stay_alive)
-        self.ircobj.execute_delayed(0, self.send_buffer)
+        self.ircobj.execute_delayed(0, self.flood_control)
         self.initialized = True
         
     def _on_msg(self, c, e):
@@ -254,9 +256,22 @@ class ConvertingBot(Bot):
             msg = force_unicode(msg, self.encoding_here)
             self.bot_there.buffer.append(Packet(target=channel_name, message=msg))
 
-    def send_buffer(self):
+    def flood_control(self):
+        if self.buffer:
+            packet = self.buffer[0]
+            msg = force_unicode(packet.message)
+            msg = msg.encode(self.encoding_here, 'xmlcharrefreplace')
+            delay = 0.5 + len(msg) / 35.
+            if delay > 4:
+                delay = 4
+            self.ircobj.execute_delayed(delay, self.pop_buffer)
+        self.ircobj.execute_delayed(0.1, self.flood_control)
+
+    def pop_buffer(self):
         if self.buffer:
             packet = self.buffer.pop(0)
+            while not packet.target:
+                packet = self.buffer.pop(0)
             if (time.time() - packet.timestamp) > config.RESPAWN_THRESHOLD:
                 self.respawn()
             msg = force_unicode(packet.message)
@@ -265,7 +280,6 @@ class ConvertingBot(Bot):
                 self.connection.privmsg(packet.target, msg)
             except:
                 self.buffer.insert(0, packet)
-        self.ircobj.execute_delayed(1, self.send_buffer)
 
     def stay_alive(self):
         try:
@@ -297,20 +311,25 @@ class ConvertingBot(Bot):
             result = self.channel_map[result]
             return result.encode(self.encoding_there)
         except:
-            return channel
+            return None
 
 class UnikoBot():
     def __init__(self, nickname='uniko'):
         self.cp949Bot = ConvertingBot(
-            config.CP949_SERVER, nickname, 'Uniko-chan',
+            config.CP949_SERVER['server'],
+            nickname,
+            'Uniko-chan',
             reconnection_interval = 600,
-            channel_map = dict(config.CHANNELS),
+            channels = set(config.CP949_SERVER['channel_map'].keys()) | set(config.UTF8_SERVER['channel_map'].values()),
+            channel_map = config.CP949_SERVER['channel_map'],
             encoding_here = 'cp949',
             encoding_there = 'utf8')
         self.utf8Bot = ConvertingBot(
-            config.UTF8_SERVER, nickname, 'Uniko-chan',
+            config.UTF8_SERVER['server'],
+            nickname, 'Uniko-chan',
             reconnection_interval = 600,
-            channel_map = dict((_[1], _[0]) for _ in config.CHANNELS),
+            channels = set(config.UTF8_SERVER['channel_map'].keys()) | set(config.CP949_SERVER['channel_map'].values()),
+            channel_map = config.UTF8_SERVER['channel_map'],
             encoding_here = 'utf8',
             encoding_there = 'cp949',
             use_ssl = True)
@@ -323,10 +342,10 @@ class UnikoBot():
 
         timeout = 0.2
         while True:
-          self.utf8Bot.ircobj.process_once(timeout)
-          self.cp949Bot.ircobj.process_once(timeout)
+            self.utf8Bot.ircobj.process_once(timeout)
+            self.cp949Bot.ircobj.process_once(timeout)
 
-bot = UnikoBot(nickname = BOT_NAME)
+bot = UnikoBot(nickname = config.BOT_NAME)
 bot.start()
 
 # vim: et ts=4 sts=4 sw=4

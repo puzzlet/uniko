@@ -1,7 +1,4 @@
 # coding:utf-8
-CHANNELS = [
-	(u'#uniko', u'#uniko'),
-]
 PASSWORD = "doesn't work yet"
 BOT_NAME = 'i'
 RESPAWN_THRESHOLD = 30
@@ -10,11 +7,21 @@ RESPAWN_THRESHOLD = 30
 HANIRC = [
     ('irc.hanirc.org', 6665),
 ]
-CP949_SERVER = HANIRC
+CP949_SERVER = {
+        'server': HANIRC,
+        'channel_map': {
+            u'#uniko': u'#uniko_utf8',
+        },
+}
 
 FREENODE = [
-    ('irc.freenode.net', 6665),
+    ('irc.freenode.net', 6667),
 ]
-UTF8_SERVER = FREENODE
+UTF8_SERVER = {
+        'server': FREENODE,
+        'channel_map': {
+            u'#uniko_utf8': u'#uniko',
+        },
+}
 
 # vim: et ts=4 sts=4 sw=4
