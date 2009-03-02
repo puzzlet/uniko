@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # coding:utf-8
 import time
+from collections import defaultdict
 from irclib import is_channel, ServerConnectionError
 #from irclib import ServerNotConnectedError
 from ircbot import SingleServerIRCBot as Bot
@@ -48,7 +49,7 @@ class ConvertingBot(Bot):
 #        self.connection.add_global_handler('join', self.relay, 0)
         self.connection.add_global_handler('kick', self.relay, 0)
         self.connection.add_global_handler('mode', self.relay, 0)
-        self.connection.add_global_handler('part', self.relay, 0)
+#        self.connection.add_global_handler('part', self.relay, 0)
         self.connection.add_global_handler('privmsg', self.relay, 0)
         self.connection.add_global_handler('privnotice', self.relay, 0)
         self.connection.add_global_handler('pubmsg', self.relay, 0)
@@ -57,7 +58,7 @@ class ConvertingBot(Bot):
 
         # "global" relay, where no target is specified
         # it should be called before each of self.channels is updated, hence -11
-        self.connection.add_global_handler('nick', self.global_relay, -11)
+#        self.connection.add_global_handler('nick', self.global_relay, -11)
 #        self.connection.add_global_handler('quit', self.global_relay, -11)
 
     def _connect(self):
@@ -221,10 +222,11 @@ class ConvertingBot(Bot):
         elif cmd == 'aop':
             channel_here = self.channels.get(arg, None)
             channel_there = self.bot_there.channels.get(self.channel_there(arg), None)
-            if channel_here and channel_there and channel_here.is_oper(nickname) and channel_there.is_oper(config.BOT_NAME): # XXX
+            if channel_here and channel_there and channel_there.is_oper(config.BOT_NAME):
+            #if channel_here and channel_there and channel_here.is_oper(nickname) and channel_there.is_oper(config.BOT_NAME):
                 members = set(channel_there.users()) - set(channel_there.opers())
-                for nickname in members:
-                    self.bot_there.connection.mode(self.channel_there(arg), '+o %s' % nickname)
+                for _ in members:
+                    self.bot_there.connection.mode(self.channel_there(arg), '+o %s' % _)
                 msg = force_unicode(' '.join(members), self.encoding_there)
 
         if not msg:
@@ -257,6 +259,8 @@ class ConvertingBot(Bot):
             self.bot_there.buffer.append(Packet(target=channel_name, message=msg))
 
     def flood_control(self):
+        while self.buffer and not self.buffer[0].target:
+            self.buffer.pop(0)
         if self.buffer:
             packet = self.buffer[0]
             msg = force_unicode(packet.message)
@@ -270,8 +274,6 @@ class ConvertingBot(Bot):
     def pop_buffer(self):
         if self.buffer:
             packet = self.buffer.pop(0)
-            while not packet.target:
-                packet = self.buffer.pop(0)
             if (time.time() - packet.timestamp) > config.RESPAWN_THRESHOLD:
                 self.respawn()
             msg = force_unicode(packet.message)
@@ -292,11 +294,18 @@ class ConvertingBot(Bot):
             self.join_channels()
 
     def respawn(self):
-        trace("Respawining..")
-        msg = ":Message lags over %d seconds. Respawning..." % config.RESPAWN_THRESHOLD
-        for channel_name, channel_obj in self.channels.items():
-            self.disconnect(msg)
-        self.buffer = []
+        trace("Skipping..")
+        line_count = defaultdict(int)
+        while self.buffer:
+            packet = self.buffer.pop()
+            line_count[packet.target] += 1
+        for target, n in line_count.iteritems():
+            self.buffer.append(
+                Packet(
+                    target=target,
+                    message="-- Message lags over %f seconds. Skipping %d lines.."
+                        % (config.RESPAWN_THRESHOLD, n)
+                ))
 
     def join_channels(self):
         for channel in self.autojoin_channels:
