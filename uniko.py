@@ -208,15 +208,22 @@ class ConvertingBot(Bot):
             channel_here = self.channels.get(arg, None)
             channel_there = self.bot_there.channels.get(self.channel_there(arg), None)
             if channel_here and channel_there and channel_here.has_user(nickname): # or (not channel_there.is_secret())
-                members = []
+                opers = []
+                voiced = []
+                others = []
                 for member in channel_there.users():
                     if channel_there.is_oper(member):
-                        members.append('@%s' % member)
+                        opers.append(member)
                     elif channel_there.is_voiced(member):
-                        members.append('+%s' % member)
+                        voiced.append(member)
                     else:
-                        members.append(member)
-                msg = force_unicode(' '.join(members), self.encoding_there)
+                        others.append(member)
+                msg = ' '.join([
+                            ' '.join(['@%s' % _ for _ in sorted(opers)]),
+                            ' '.join(['+%s' % _ for _ in sorted(voiced)]),
+                            ' '.join(['%s' % _ for _ in sorted(others)]),
+                        ])
+                msg = force_unicode(msg, self.encoding_there)
         elif cmd == 'op':
             pass # TODO
         elif cmd == 'aop':
