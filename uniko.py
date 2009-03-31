@@ -37,29 +37,8 @@ class ConvertingBot(Bot):
             'auth':  [self._cmd_auth],
         }
 
-        #XXX: should be not initialized until other side is up
         self.initialized = False
-
-        # "local" relay, where the target is specified
         self.connection.add_global_handler('created', self._on_connected)
-        self.connection.add_global_handler('privmsg', self._on_msg, 0)
-        self.connection.add_global_handler('pubmsg', self._on_msg, 0)
-
-        self.connection.add_global_handler('action', self.relay, 0)
-#        self.connection.add_global_handler('join', self.relay, 0)
-        self.connection.add_global_handler('kick', self.relay, 0)
-        self.connection.add_global_handler('mode', self.relay, 0)
-#        self.connection.add_global_handler('part', self.relay, 0)
-        self.connection.add_global_handler('privmsg', self.relay, 0)
-        self.connection.add_global_handler('privnotice', self.relay, 0)
-        self.connection.add_global_handler('pubmsg', self.relay, 0)
-        self.connection.add_global_handler('pubnotice', self.relay, 0)
-        self.connection.add_global_handler('topic', self.relay, 0)
-
-        # "global" relay, where no target is specified
-        # it should be called before each of self.channels is updated, hence -11
-#        self.connection.add_global_handler('nick', self.global_relay, -11)
-#        self.connection.add_global_handler('quit', self.global_relay, -11)
 
     def _connect(self):
         """overrides Bot._connect()"""
@@ -79,11 +58,13 @@ class ConvertingBot(Bot):
     def _on_connected(self, c, e):
         trace('Connected.')
         self.join_channels()
-        if self.initialized:    return
-        if c != self.connection:    return
+        if self.initialized:
+            return
+        if c != self.connection:
+            return
         self.ircobj.execute_delayed(0, self.stay_alive)
         self.ircobj.execute_delayed(0, self.flood_control)
-        self.initialized = True
+        self.initialized = True #FIXME: should be not initialized until other side is up
         
     def _on_msg(self, c, e):
         if c != self.connection: return
@@ -149,7 +130,7 @@ class ConvertingBot(Bot):
         if not nickname:
             trace('Unhandled message: %s' % self.repr_event(e))
             return
-        if nickname == config.BOT_NAME: # XXX
+        if nickname in [self.connection.nickname]:
             return
 
         arg = e.arguments()
@@ -178,9 +159,10 @@ class ConvertingBot(Bot):
             msg = '*%s %s %s' % (nickname, eventtype, repr(arg))
             trace('Unexpected message: %s' % repr(msg))
 
-        if msg:
-            msg = force_unicode(msg, self.encoding_here)
-            self.bot_there.buffer.append(Packet(target=target, message=msg))
+        if not msg:
+            return
+        msg = force_unicode(msg, self.encoding_here)
+        self.bot_there.buffer.append(Packet(target=target, message=msg))
 
     def process_personal_event(self, e):
         target = e.target()
@@ -189,7 +171,7 @@ class ConvertingBot(Bot):
             raise TypeError
 
         mode, nickname = self.get_nickname(e)
-        if nickname == config.BOT_NAME: # XXX
+        if nickname == self.connection.nickname:
             return
 
         eventtype = e.eventtype().lower()
@@ -219,9 +201,9 @@ class ConvertingBot(Bot):
                     else:
                         others.append(member)
                 msg = ' '.join([
-                            ' '.join(['@%s' % _ for _ in sorted(opers)]),
-                            ' '.join(['+%s' % _ for _ in sorted(voiced)]),
-                            ' '.join(['%s' % _ for _ in sorted(others)]),
+                            ' '.join(['@%s' % _ for _ in sorted(opers, key=str.lower)]),
+                            ' '.join(['+%s' % _ for _ in sorted(voiced, key=str.lower)]),
+                            ' '.join(['%s' % _ for _ in sorted(others, key=str.lower)]),
                         ])
                 msg = force_unicode(msg, self.encoding_there)
         elif cmd == 'op':
@@ -281,8 +263,8 @@ class ConvertingBot(Bot):
     def pop_buffer(self):
         if self.buffer:
             packet = self.buffer.pop(0)
-            if (time.time() - packet.timestamp) > config.RESPAWN_THRESHOLD:
-                self.respawn()
+            if (time.time() - packet.timestamp) > config.PURGE_THRESHOLD:
+                self.purge_buffer()
             msg = force_unicode(packet.message)
             msg = msg.encode(self.encoding_here, 'xmlcharrefreplace')
             try:
@@ -291,8 +273,9 @@ class ConvertingBot(Bot):
                 self.buffer.insert(0, packet)
 
     def stay_alive(self):
+        return
         try:
-            self.connection.privmsg(config.BOT_NAME, '.') # XXX
+            self.connection.privmsg(self.connection.nickname, '.')
             self.ircobj.execute_delayed(10, self.stay_alive)
         except:
             self.buffer = []
@@ -300,11 +283,11 @@ class ConvertingBot(Bot):
             self.jump_server()
             self.join_channels()
 
-    def respawn(self):
-        trace("Skipping..")
+    def purge_buffer(self):
         line_count = defaultdict(int)
         while self.buffer:
             packet = self.buffer.pop()
+            trace('Purging %s' % repr(packet))
             line_count[packet.target] += 1
         for target, n in line_count.iteritems():
             self.buffer.append(
@@ -339,22 +322,49 @@ class UnikoBot():
             channels = set(config.CP949_SERVER['channel_map'].keys()) | set(config.UTF8_SERVER['channel_map'].values()),
             channel_map = config.CP949_SERVER['channel_map'],
             encoding_here = 'cp949',
-            encoding_there = 'utf8')
+            encoding_there = 'utf8',
+            use_ssl = config.UTF8_SERVER['use_ssl'])
         self.utf8Bot = ConvertingBot(
             config.UTF8_SERVER['server'],
-            nickname, 'Uniko-chan',
+            nickname,
+            'Uniko-chan',
             reconnection_interval = 600,
             channels = set(config.UTF8_SERVER['channel_map'].keys()) | set(config.CP949_SERVER['channel_map'].values()),
             channel_map = config.UTF8_SERVER['channel_map'],
             encoding_here = 'utf8',
             encoding_there = 'cp949',
-            use_ssl = True)
+            use_ssl = config.UTF8_SERVER['use_ssl'])
+
         self.cp949Bot.bot_there = self.utf8Bot
         self.utf8Bot.bot_there = self.cp949Bot
+
+    def set_reader(self, bot):
+        # "local" relay, where the target is specified
+        bot.connection.add_global_handler('privmsg', bot._on_msg, 0)
+        bot.connection.add_global_handler('pubmsg', bot._on_msg, 0)
+
+        bot.connection.add_global_handler('action', bot.relay, 0)
+#        bot.connection.add_global_handler('join', bot.relay, 0)
+        bot.connection.add_global_handler('kick', bot.relay, 0)
+        bot.connection.add_global_handler('mode', bot.relay, 0)
+#        bot.connection.add_global_handler('part', bot.relay, 0)
+        bot.connection.add_global_handler('privmsg', bot.relay, 0)
+        bot.connection.add_global_handler('privnotice', bot.relay, 0)
+        bot.connection.add_global_handler('pubmsg', bot.relay, 0)
+        bot.connection.add_global_handler('pubnotice', bot.relay, 0)
+        bot.connection.add_global_handler('topic', bot.relay, 0)
+
+        # "global" relay, where no target is specified
+        # it should be called before each of bot.channels is updated, hence -11
+#        bot.connection.add_global_handler('nick', bot.global_relay, -11)
+#        bot.connection.add_global_handler('quit', bot.global_relay, -11)
 
     def start(self):
         self.utf8Bot._connect()
         self.cp949Bot._connect()
+
+        self.set_reader(self.utf8Bot)
+        self.set_reader(self.cp949Bot)
 
         timeout = 0.2
         while True:

@@ -1,26 +1,30 @@
 # coding:utf-8
 PASSWORD = "doesn't work yet"
-BOT_NAME = 'i'
-RESPAWN_THRESHOLD = 30
+BOT_NAME = 'uniko'
+PURGE_THRESHOLD = 30
 
 
 HANIRC = [
     ('irc.hanirc.org', 6665),
 ]
-CP949_SERVER = {
-        'server': HANIRC,
-        'channel_map': {
-            u'#uniko': u'#uniko_utf8',
-        },
-}
-
 FREENODE = [
     ('irc.freenode.net', 6667),
 ]
+
+CP949_SERVER = {
+        'server': HANIRC,
+        'use_ssl': False,
+        'channel_map': {
+            # cp949: utf8
+            u'#uniko': u'#uniko',
+        },
+}
 UTF8_SERVER = {
         'server': FREENODE,
+        'use_ssl': False,
         'channel_map': {
-            u'#uniko_utf8': u'#uniko',
+            # utf8: cp949
+            u'#uniko': u'#uniko',
         },
 }
 
