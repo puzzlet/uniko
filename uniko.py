@@ -2,7 +2,7 @@
 # coding:utf-8
 import time
 from collections import defaultdict
-from irclib import is_channel, ServerConnectionError
+from irclib import nm_to_n, is_channel, ServerConnectionError
 #from irclib import ServerNotConnectedError
 from ircbot import SingleServerIRCBot as Bot
 from util import *
@@ -11,11 +11,17 @@ import config
 class Packet():
     def __init__(self, target, message='', timestamp=None):
         self.target = target
-        self.message = message
+        self.message = force_unicode(message)
         self.timestamp = timestamp if timestamp else time.time()
 
     def __repr__(self):
         return '<Packet %s %s %s>' % (self.target, self.message, repr(self.timestamp))
+        return u'<Packet %s %s %s>' % (
+            force_unicode(self.target),
+            force_unicode(self.message),
+            force_unicode(repr(self.timestamp))
+        )
+
 
 class ConvertingBot(Bot):
     def __init__(self, server_list, nickname, realname, reconnection_interval=60, channels=[], channel_map={}, encoding_here='', encoding_there='', bot_there=None, use_ssl=False):
@@ -93,26 +99,6 @@ class ConvertingBot(Bot):
         result = [e.source(), e.target(), e.eventtype(), e.arguments()]
         return ' '.join([repr(x) for x in result])
 
-    def get_nickname(self, e):
-        source = e.source()
-        if not source:
-            return None, None
-        nickname, _, _ = source.partition('!')
-
-        target = e.target()
-        channel = self.channels.get(target, None)
-        if not channel:
-            return '', nickname
-
-        if channel.is_oper(nickname):
-            mode = '@'
-        elif channel.is_voiced(nickname):
-            mode = '+'
-        else:
-            mode = ' '
-
-        return mode, nickname
-
     def relay(self, c, e):
         if c != self.connection: return
 
@@ -126,12 +112,21 @@ class ConvertingBot(Bot):
         target = e.target()
         if not is_channel(target):
             raise TypeError
-        mode, nickname = self.get_nickname(e)
+        nickname = nm_to_n(e.source())
         if not nickname:
             trace('Unhandled message: %s' % self.repr_event(e))
             return
         if nickname in [self.connection.nickname]:
             return
+        channel = self.channels.get(target, None)
+        if not channel:
+            mode = ''
+        elif channel.is_oper(nickname):
+            mode = '@'
+        elif channel.is_voiced(nickname):
+            mode = '+'
+        else:
+            mode = ' '
 
         arg = e.arguments()
         target = self.channel_there(target)
@@ -170,7 +165,7 @@ class ConvertingBot(Bot):
             return
             raise TypeError
 
-        mode, nickname = self.get_nickname(e)
+        nickname = nm_to_n(e.source())
         if nickname == self.connection.nickname:
             return
 
@@ -229,7 +224,7 @@ class ConvertingBot(Bot):
         if c != self.connection: return
 
         try:
-            mode, nickname = self.get_nickname(e)
+            nickname = nm_to_n(e.source())
         except:
             trace('Unhandled message: %s' % self.repr_event(e))
             return
@@ -252,7 +247,7 @@ class ConvertingBot(Bot):
             self.buffer.pop(0)
         if self.buffer:
             packet = self.buffer[0]
-            msg = force_unicode(packet.message)
+            msg = packet.message
             msg = msg.encode(self.encoding_here, 'xmlcharrefreplace')
             delay = 0.5 + len(msg) / 35.
             if delay > 4:
@@ -265,7 +260,7 @@ class ConvertingBot(Bot):
             packet = self.buffer.pop(0)
             if (time.time() - packet.timestamp) > config.PURGE_THRESHOLD:
                 self.purge_buffer()
-            msg = force_unicode(packet.message)
+            msg = packet.message
             msg = msg.encode(self.encoding_here, 'xmlcharrefreplace')
             try:
                 self.connection.privmsg(packet.target, msg)
@@ -287,7 +282,7 @@ class ConvertingBot(Bot):
         line_count = defaultdict(int)
         while self.buffer:
             packet = self.buffer.pop()
-            trace('Purging %s' % repr(packet))
+            trace(u'Purging %s' % repr(packet))
             line_count[packet.target] += 1
         for target, n in line_count.iteritems():
             self.buffer.append(
@@ -323,7 +318,7 @@ class UnikoBot():
             channel_map = config.CP949_SERVER['channel_map'],
             encoding_here = 'cp949',
             encoding_there = 'utf8',
-            use_ssl = config.UTF8_SERVER['use_ssl'])
+            use_ssl = config.CP949_SERVER['use_ssl'])
         self.utf8Bot = ConvertingBot(
             config.UTF8_SERVER['server'],
             nickname,
