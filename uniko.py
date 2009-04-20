@@ -2,7 +2,8 @@
 # coding:utf-8
 import time
 from collections import defaultdict
-from irclib import nm_to_n, is_channel, ServerConnectionError
+from irclib import nm_to_n, is_channel, parse_channel_modes
+from irclib import ServerConnectionError
 #from irclib import ServerNotConnectedError
 from ircbot import SingleServerIRCBot as Bot
 from util import *
@@ -15,13 +16,11 @@ class Packet():
         self.timestamp = timestamp if timestamp else time.time()
 
     def __repr__(self):
-        return '<Packet %s %s %s>' % (self.target, self.message, repr(self.timestamp))
-        return u'<Packet %s %s %s>' % (
+        return (u'<Packet %s %s %s>' % (
             force_unicode(self.target),
             force_unicode(self.message),
             force_unicode(repr(self.timestamp))
-        )
-
+        )).encode('utf-8')
 
 class ConvertingBot(Bot):
     def __init__(self, server_list, nickname, realname, reconnection_interval=60, channels=[], channel_map={}, encoding_here='', encoding_there='', bot_there=None, use_ssl=False):
@@ -144,7 +143,8 @@ class ConvertingBot(Bot):
         elif eventtype in ['kick']:
             msg = '*%s %s %s (%s)' % (nickname, eventtype, arg[0], arg[1])
         elif eventtype in ['mode']:
-            if not (arg and arg[0].startswith('+o')):
+            modes = parse_channel_modes(' '.join(arg))
+            if any(_[0] != '+' or _[1] not in ['o', 'v'] for _ in modes):
                 msg = '*%s %s %s' % (nickname, eventtype, ' '.join(arg))
         elif eventtype in ['part']:
             msg = '*%s %s %s' % (nickname, eventtype, ' '.join(arg))
@@ -165,7 +165,7 @@ class ConvertingBot(Bot):
             return
             raise TypeError
 
-        nickname = nm_to_n(e.source())
+        nickname = nm_to_n(e.source() or '')
         if nickname == self.connection.nickname:
             return
 
@@ -282,14 +282,14 @@ class ConvertingBot(Bot):
         line_count = defaultdict(int)
         while self.buffer:
             packet = self.buffer.pop()
-            trace(u'Purging %s' % repr(packet))
+            trace('Purging %s' % repr(packet))
             line_count[packet.target] += 1
         for target, n in line_count.iteritems():
             self.buffer.append(
                 Packet(
                     target=target,
                     message="-- Message lags over %f seconds. Skipping %d lines.."
-                        % (config.RESPAWN_THRESHOLD, n)
+                        % (config.PURGE_THRESHOLD, n)
                 ))
 
     def join_channels(self):
@@ -355,8 +355,8 @@ class UnikoBot():
 #        bot.connection.add_global_handler('quit', bot.global_relay, -11)
 
     def start(self):
-        self.utf8Bot._connect()
         self.cp949Bot._connect()
+        self.utf8Bot._connect()
 
         self.set_reader(self.utf8Bot)
         self.set_reader(self.cp949Bot)
