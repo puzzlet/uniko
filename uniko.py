@@ -2,16 +2,16 @@
 # coding:utf-8
 import time
 from collections import defaultdict
-from irclib import nm_to_n, is_channel, parse_channel_modes
+from irclib import irc_lower, is_channel, nm_to_n, parse_channel_modes
 from irclib import ServerConnectionError
 #from irclib import ServerNotConnectedError
-from ircbot import SingleServerIRCBot as Bot
+from ircbot import SingleServerIRCBot
 from util import *
 import config
 
 class Packet():
     def __init__(self, target, message='', timestamp=None):
-        self.target = target
+        self.target = irc_lower(target)
         self.message = force_unicode(message)
         self.timestamp = timestamp if timestamp else time.time()
 
@@ -22,14 +22,16 @@ class Packet():
             force_unicode(repr(self.timestamp))
         )).encode('utf-8')
 
-class ConvertingBot(Bot):
+class ConvertingBot(SingleServerIRCBot):
     def __init__(self, server_list, nickname, realname, reconnection_interval=60, channels=[], channel_map={}, encoding_here='', encoding_there='', bot_there=None, use_ssl=False):
-        Bot.__init__(self, server_list, nickname, realname, reconnection_interval)
+        SingleServerIRCBot.__init__(self, server_list, nickname, realname, reconnection_interval)
         self.encoding_here = encoding_here
         self.encoding_there = encoding_there
         self.bot_there = bot_there
-        self.autojoin_channels = list(channels)
-        self.channel_map = dict(channel_map)
+        self.autojoin_channels = [irc_lower(channel) for channel in channels]
+        self.channel_map = {}
+        for key, value in dict(channel_map).iteritems():
+            self.channel_map[irc_lower(key)] = irc_lower(value)
         self.use_ssl = use_ssl
         for channel in self.channel_map.keys():
             if type(channel) == unicode:
@@ -46,7 +48,7 @@ class ConvertingBot(Bot):
         self.connection.add_global_handler('created', self._on_connected)
 
     def _connect(self):
-        """overrides Bot._connect()"""
+        """overrides SingleServerIRCBot._connect()"""
         password = None
         if len(self.server_list[0]) > 2:
             password = self.server_list[0][2]
@@ -137,21 +139,21 @@ class ConvertingBot(Bot):
         elif eventtype in ['privnotice', 'pubnotice']:
             msg = '>%s%s< %s' % (mode, nickname, arg[0])
         elif eventtype in ['join']:
-            msg = '*%s %s' % (nickname, eventtype)
+            msg = '! %s %s' % (nickname, eventtype)
         elif eventtype in ['topic'] and len(arg) == 1:
-            msg = '*%s %s "%s"' % (nickname, eventtype, arg[0])
+            msg = '! %s %s "%s"' % (nickname, eventtype, arg[0])
         elif eventtype in ['kick']:
-            msg = '*%s %s %s (%s)' % (nickname, eventtype, arg[0], arg[1])
+            msg = '! %s %s %s (%s)' % (nickname, eventtype, arg[0], arg[1])
         elif eventtype in ['mode']:
             modes = parse_channel_modes(' '.join(arg))
             if any(_[0] != '+' or _[1] not in ['o', 'v'] for _ in modes):
-                msg = '*%s %s %s' % (nickname, eventtype, ' '.join(arg))
+                msg = '! %s %s %s' % (nickname, eventtype, ' '.join(arg))
         elif eventtype in ['part']:
-            msg = '*%s %s %s' % (nickname, eventtype, ' '.join(arg))
+            msg = '! %s %s %s' % (nickname, eventtype, ' '.join(arg))
         elif eventtype in ['action']:
-            msg = '\001ACTION <%s%s> %s\001' % (mode, nickname, ' '.join(arg))
+            msg = '\x02* %s\x02 %s' % (nickname, ' '.join(arg))
         else:
-            msg = '*%s %s %s' % (nickname, eventtype, repr(arg))
+            msg = '! %s %s %s' % (nickname, eventtype, repr(arg))
             trace('Unexpected message: %s' % repr(msg))
 
         if not msg:
@@ -209,8 +211,9 @@ class ConvertingBot(Bot):
             if channel_here and channel_there and channel_there.is_oper(config.BOT_NAME):
             #if channel_here and channel_there and channel_here.is_oper(nickname) and channel_there.is_oper(config.BOT_NAME):
                 members = set(channel_there.users()) - set(channel_there.opers())
-                for _ in members:
-                    self.bot_there.connection.mode(self.channel_there(arg), '+o %s' % _)
+                for _ in partition(members, 3):
+                    mode_string = '+%s %s' % ('o' * len(_), ' '.join(_))
+                    self.bot_there.connection.mode(self.channel_there(arg), mode_string)
                 msg = force_unicode(' '.join(members), self.encoding_there)
 
         if not msg:
