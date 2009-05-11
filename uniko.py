@@ -11,7 +11,7 @@ import config
 
 class Packet():
     def __init__(self, target, message='', timestamp=None):
-        self.target = irc_lower(target)
+        self.target = target
         self.message = force_unicode(message)
         self.timestamp = timestamp if timestamp else time.time()
 
@@ -28,10 +28,12 @@ class ConvertingBot(SingleServerIRCBot):
         self.encoding_here = encoding_here
         self.encoding_there = encoding_there
         self.bot_there = bot_there
-        self.autojoin_channels = [irc_lower(channel) for channel in channels]
+        self.autojoin_channels = [self._irc_lower(channel) for channel in channels]
         self.channel_map = {}
         for key, value in dict(channel_map).iteritems():
-            self.channel_map[irc_lower(key)] = irc_lower(value)
+            key = self._irc_lower(key)
+            value = self.bot_there._irc_lower(value)
+            self.channel_map[key] = value
         self.use_ssl = use_ssl
         for channel in self.channel_map.keys():
             if type(channel) == unicode:
@@ -95,7 +97,12 @@ class ConvertingBot(SingleServerIRCBot):
         if msg == config.PASSWORD:
             self.root_user.append(e.source())
             self.buffer.append(Packet(target=e.source(), message='done.'))
-    
+
+    def _irc_lower(self, s):
+        # TODO: prepare python 3.0 as string.translate goes unicode
+        s = force_unicode(s).encode(self.encoding_here)
+        return irc_lower(s).decoe(self.encoding_here)
+
     def repr_event(self, e):
         result = [e.source(), e.target(), e.eventtype(), e.arguments()]
         return ' '.join([repr(x) for x in result])
@@ -187,10 +194,12 @@ class ConvertingBot(SingleServerIRCBot):
             channel_here = self.channels.get(arg, None)
             channel_there = self.bot_there.channels.get(self.channel_there(arg), None)
             if channel_here and channel_there and channel_here.has_user(nickname): # or (not channel_there.is_secret())
+            # TODO: what will happen if nickname isn't ascii?
                 opers = []
                 voiced = []
                 others = []
-                for member in channel_there.users():
+                members = channel_there.users()
+                for member in members:
                     if channel_there.is_oper(member):
                         opers.append(member)
                     elif channel_there.is_voiced(member):
@@ -198,6 +207,7 @@ class ConvertingBot(SingleServerIRCBot):
                     else:
                         others.append(member)
                 msg = ' '.join([
+                            'Total %d:' % len(members),
                             ' '.join(['@%s' % _ for _ in sorted(opers, key=str.lower)]),
                             ' '.join(['+%s' % _ for _ in sorted(voiced, key=str.lower)]),
                             ' '.join(['%s' % _ for _ in sorted(others, key=str.lower)]),
@@ -211,7 +221,7 @@ class ConvertingBot(SingleServerIRCBot):
             if channel_here and channel_there and channel_there.is_oper(config.BOT_NAME):
             #if channel_here and channel_there and channel_here.is_oper(nickname) and channel_there.is_oper(config.BOT_NAME):
                 members = set(channel_there.users()) - set(channel_there.opers())
-                for _ in partition(members, 3):
+                for _ in partition(members.__iter__(), 3):
                     mode_string = '+%s %s' % ('o' * len(_), ' '.join(_))
                     self.bot_there.connection.mode(self.channel_there(arg), mode_string)
                 msg = force_unicode(' '.join(members), self.encoding_there)
@@ -265,8 +275,9 @@ class ConvertingBot(SingleServerIRCBot):
                 self.purge_buffer()
             msg = packet.message
             msg = msg.encode(self.encoding_here, 'xmlcharrefreplace')
+            target = self._irc_lower(packet.target)
             try:
-                self.connection.privmsg(packet.target, msg)
+                self.connection.privmsg(target, msg)
             except:
                 self.buffer.insert(0, packet)
 
