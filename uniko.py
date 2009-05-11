@@ -32,7 +32,6 @@ class ConvertingBot(SingleServerIRCBot):
         self.channel_map = {}
         for key, value in dict(channel_map).iteritems():
             key = self._irc_lower(key)
-            value = self.bot_there._irc_lower(value)
             self.channel_map[key] = value
         self.use_ssl = use_ssl
         for channel in self.channel_map.keys():
@@ -101,7 +100,7 @@ class ConvertingBot(SingleServerIRCBot):
     def _irc_lower(self, s):
         # TODO: prepare python 3.0 as string.translate goes unicode
         s = force_unicode(s).encode(self.encoding_here)
-        return irc_lower(s).decoe(self.encoding_here)
+        return irc_lower(s)
 
     def repr_event(self, e):
         result = [e.source(), e.target(), e.eventtype(), e.arguments()]
