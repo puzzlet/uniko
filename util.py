@@ -30,6 +30,8 @@ def partition(iterable, count):
 
 def force_unicode(str, encoding=None):
     """Converts input into unicode using auto-detected encoding."""
+    if not str:
+        return u''
     if type(str) == unicode:
         return str
     if encoding is None:
@@ -38,3 +40,10 @@ def force_unicode(str, encoding=None):
         print 'Cannot find encoding for %s' % repr(str)
         return '?'
     return str.decode(encoding, 'replace')
+
+def smart_encode(str, output_encoding):
+    """Converts input into string/byte, represented by specified encoding."""
+    u = force_unicode(str)
+    if not u:
+        return None
+    return u.encode(output_encoding)

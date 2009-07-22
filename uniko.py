@@ -2,6 +2,7 @@
 # coding:utf-8
 import time
 from collections import defaultdict
+import irclib
 from irclib import irc_lower, is_channel, nm_to_n, parse_channel_modes
 from irclib import ServerConnectionError
 #from irclib import ServerNotConnectedError
@@ -9,7 +10,11 @@ from ircbot import SingleServerIRCBot
 from util import *
 import config
 
+if config.DEBUG_MODE:
+    irclib.DEBUG = 1
+
 class Packet():
+    #TODO: all members in Packet should be unicode, ready to be encoded in each bot
     def __init__(self, target, message='', timestamp=None):
         self.target = target
         self.message = force_unicode(message)
@@ -70,10 +75,9 @@ class ConvertingBot(SingleServerIRCBot):
             return
         if c != self.connection:
             return
-        self.ircobj.execute_delayed(0, self.stay_alive)
         self.ircobj.execute_delayed(0, self.flood_control)
         self.initialized = True #FIXME: should be not initialized until other side is up
-        
+ 
     def _on_msg(self, c, e):
         if c != self.connection: return
         
@@ -99,7 +103,7 @@ class ConvertingBot(SingleServerIRCBot):
 
     def _irc_lower(self, s):
         # TODO: prepare python 3.0 as string.translate goes unicode
-        s = force_unicode(s).encode(self.encoding_here)
+        s = force_unicode(s).encode(self.encoding_here, 'replace')
         return irc_lower(s)
 
     def repr_event(self, e):
@@ -191,7 +195,8 @@ class ConvertingBot(SingleServerIRCBot):
         cmd = cmd[1:]
         if cmd == 'who':
             channel_here = self.channels.get(arg, None)
-            channel_there = self.bot_there.channels.get(self.channel_there(arg), None)
+            channel_there_name = self.channel_there(arg)
+            channel_there = self.bot_there.channels.get(channel_there_name, None)
             if channel_here and channel_there and channel_here.has_user(nickname): # or (not channel_there.is_secret())
             # TODO: what will happen if nickname isn't ascii?
                 opers = []
@@ -205,12 +210,15 @@ class ConvertingBot(SingleServerIRCBot):
                         voiced.append(member)
                     else:
                         others.append(member)
+                opers = sorted(opers, key=self._irc_lower)
+                voiced = sorted(voiced, key=self._irc_lower)
+                others = sorted(others, key=self._irc_lower)
                 msg = ' '.join([
-                            'Total %d:' % len(members),
-                            ' '.join(['@%s' % _ for _ in sorted(opers, key=str.lower)]),
-                            ' '.join(['+%s' % _ for _ in sorted(voiced, key=str.lower)]),
-                            ' '.join(['%s' % _ for _ in sorted(others, key=str.lower)]),
-                        ])
+                    'Total %d in %s:' % (len(members), channel_there_name),
+                    ' '.join('@%s' % _ for _ in opers),
+                    ' '.join('+%s' % _ for _ in voiced),
+                    ' '.join('%s' % _ for _ in others),
+                ])
                 msg = force_unicode(msg, self.encoding_there)
         elif cmd == 'op':
             pass # TODO
@@ -280,17 +288,6 @@ class ConvertingBot(SingleServerIRCBot):
             except:
                 self.buffer.insert(0, packet)
 
-    def stay_alive(self):
-        return
-        try:
-            self.connection.privmsg(self.connection.nickname, '.')
-            self.ircobj.execute_delayed(10, self.stay_alive)
-        except:
-            self.buffer = []
-            trace("Connection closed. Reconnecting..")
-            self.jump_server()
-            self.join_channels()
-
     def purge_buffer(self):
         line_count = defaultdict(int)
         while self.buffer:
@@ -298,27 +295,27 @@ class ConvertingBot(SingleServerIRCBot):
             trace('Purging %s' % repr(packet))
             line_count[packet.target] += 1
         for target, n in line_count.iteritems():
-            self.buffer.append(
-                Packet(
-                    target=target,
-                    message="-- Message lags over %f seconds. Skipping %d lines.."
-                        % (config.PURGE_THRESHOLD, n)
-                ))
+            packet = Packet(
+                target=target,
+                message="-- Message lags over %f seconds. Skipping %d lines.."
+                    % (config.PURGE_THRESHOLD, n)
+            )
+            self.buffer.append(packet)
 
     def join_channels(self):
         for channel in self.autojoin_channels:
             try:
                 self.connection.join(channel)
-            except:
+            except: # TODO: specify exception class
                 pass
 
     def channel_there(self, channel):
-        try:
-            result = force_unicode(channel, self.encoding_here)
-            result = self.channel_map[result]
-            return result.encode(self.encoding_there)
-        except:
+        result = force_unicode(channel, self.encoding_here)
+        result = self.channel_map.get(result, None)
+        #TODO: channel_map shouldn't neccessaily be 1:1 in later version
+        if not result:
             return None
+        return result.encode(self.encoding_there)
 
 class UnikoBot():
     def __init__(self, nickname='uniko'):
