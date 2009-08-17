@@ -1,4 +1,5 @@
 # coding:utf-8
+DEBUG_MODE = False
 PASSWORD = "doesn't work yet"
 BOT_NAME = 'uniko'
 PURGE_THRESHOLD = 30
