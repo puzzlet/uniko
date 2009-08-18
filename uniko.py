@@ -67,10 +67,15 @@ class PacketBuffer(object):
     def push(self, packet):
         return heapq.heappush(self.heap, packet)
 
+    def _pop(self):
+        if not self.heap:
+            return None
+        return heapq.heappop(self.heap)
+
     def pop(self):
         if self.peek().timestamp < time.time() - self.timeout:
             self.purge()
-        return heapq.heappop(self.heap)
+        return self._pop()
 
     def purge(self):
         stale = time.time() - self.timeout
@@ -79,10 +84,10 @@ class PacketBuffer(object):
             packet = self.peek()
             if packet.timestamp > stale:
                 break
-            packet = self.pop()
+            packet = self._pop()
             if packet.command in ['privmsg', 'privnotice']:
                 target, message = packet.arguments
-                if not message.statswith('--'): # XXX
+                if not message.startswith('--'): # XXX
                     line_counts[target] += 1
         for target, line_count in line_counts.iteritems():
             message = "-- Message lags over %f seconds. Skipping %d line(s).." \
@@ -445,6 +450,8 @@ class BufferingBot(ircbot.SingleServerIRCBot):
             packet = self.global_buffer.pop()
         else:
             return
+        if not packet:
+            return
         try:
             if packet.command == 'privmsg':
                 self.connection.privmsg(*packet.arguments)
@@ -452,6 +459,9 @@ class BufferingBot(ircbot.SingleServerIRCBot):
                 self.connection.privnotice(*packet.arguments)
             elif packet.command == 'join':
                 self.connection.join(*packet.arguments)
+        except irclib.ServerNotConnectedError:
+            self.push_packet(packet)
+            self._connect()
         except:
             traceback.print_exc()
             self.push_packet(packet)
