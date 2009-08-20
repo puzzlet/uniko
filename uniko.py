@@ -86,7 +86,12 @@ class PacketBuffer(object):
                 break
             packet = self._pop()
             if packet.command in ['privmsg', 'privnotice']:
-                target, message = packet.arguments
+                try:
+                    target, message = packet.arguments
+                except:
+                    traceback.print_exc()
+                    self.push(packet)
+                    return
                 if not message.startswith('--'): # XXX
                     line_counts[target] += 1
         for target, line_count in line_counts.iteritems():
@@ -283,7 +288,7 @@ class StandardPipe(Handler):
         elif cmd == 'op':
             pass # TODO
         elif cmd == 'aop':
-            return self.handle_aop(server, arg)
+            return self.handle_aop(server, event, arg)
         return False
 
     def handle_who(self, server, event, arg):
@@ -328,9 +333,10 @@ class StandardPipe(Handler):
         # TODO: asynchronous
         return False
 
-    def handle_aop(self, server, arg):
+    def handle_aop(self, server, event, arg):
         if not self.check_channel(server, arg):
             return False
+        nickname = irclib.nm_to_n(event.source() or '')
         channel = server.decode(arg)
         for target_server in self.servers:
             if target_server == server:
@@ -354,7 +360,7 @@ class StandardPipe(Handler):
             msg = server.encode(target_server.decode(msg))
             packet = Packet(
                 command = 'privmsg',
-                arguments = msg
+                arguments = (nickname, msg)
             )
             server.bot.push_packet(packet)
         return True
