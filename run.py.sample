@@ -10,6 +10,7 @@ def main():
             servers = (HANIRC, FREENODE),
             channels = [
                 u'#uniko',
+                Channel(u'#uniko-multiple', 2),
                 (u'#uniko-hanirc', u'#uniko-freenode'),
             ]
         ),

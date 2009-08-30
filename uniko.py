@@ -9,29 +9,13 @@ import traceback
 
 import util
 
-"""Uniko's main module
-
-speaking:
-Buffer가 Packet 여러 개를 가지고 있고
-Bot 여러 개가 Buffer 하나를 공유할 수 있고 (thread-safe? -_-)
-flood-control은 Bot이 알아서 따로따로
-Server가 Buffer 하나를 관리하고 있고
-
-listening:
-Bot에 들어오는 메시지를 Pipe가 처리하는데
-우리 Bot끼리 하는 말은 Pipe가 무시해야 하고
-채널마다 listening Bot은 하나만 있어도 됨
-
-각 채널마다 listening bot이 뭔지 speaking bot이 뭔지는 어디서 관리하나
-쿼리는 그 해당 봇이 처리해야 하는데 flood-control도 해줘야 함
-ㄴ buffer_append를 봇에서 알아서 처리해줘야
-"""
+"""Uniko's main module"""
 
 class Packet():
-    def __init__(self, command, arguments):
+    def __init__(self, command, arguments, timestamp=None):
         self.command = command
         self.arguments = arguments
-        self.timestamp = time.time()
+        self.timestamp = time.time() if timestamp is None else timestamp
 
     def __repr__(self):
         return '<Packet %s %s %s>' % (
@@ -84,6 +68,8 @@ class PacketBuffer(object):
             packet = self.peek()
             if packet.timestamp > stale:
                 break
+            if packet.command in ['join']: # XXX
+                break
             packet = self._pop()
             if packet.command in ['privmsg', 'privnotice']:
                 try:
@@ -103,6 +89,25 @@ class PacketBuffer(object):
             )
             self.push(packet)
 
+class Channel(object):
+    def __init__(self, name, weight=1):
+        self.name = name
+        self.weight = weight
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def __unicode__(self):
+        return self.name
+
+    def __eq__(self, rhs):
+        if type(rhs) == Channel:
+            return self.name == rhs.name
+        return self.name == rhs
+
+    def encode(self, *_):
+        return self.name.encode(*_)
+
 class Server(object):
     """Stores information about an IRC network.
     Also works as a packet buffer when the bot is running.
@@ -112,7 +117,7 @@ class Server(object):
         self.server_list = server_list
         self.encoding = encoding
         self.use_ssl = use_ssl
-        self.bot = None # XXX
+        self.bots = []
         self.buffer = PacketBuffer(timeout=10.0)
 
     def encode(self, string):
@@ -123,22 +128,71 @@ class Server(object):
         """Safely decode the string using the server's encoding."""
         return string.decode(self.encoding, 'ignore')
 
+    def add_bot(self, nickname):
+        bot = BufferingBot(
+            self.server_list,
+            nickname,
+            'Uniko',
+            reconnection_interval = 600,
+            use_ssl = self.use_ssl)
+        bot.set_global_buffer(self.buffer)
+        bot.server = self
+        self.bots.append(bot)
+
+    def is_one_of_us(self, nickname):
+        nicknames = [bot.connection.get_nickname() for bot in self.bots]
+        return nickname in nicknames
+
+    def is_listening_bot(self, bot, channel):
+        """Tell whether the bot is the listening bot for the channel."""
+        if not irclib.is_channel(channel):
+            return False # not even a channel
+        if bot not in self.bots:
+            return False
+        bots = self.get_bots_by_channel(channel)
+        if bot not in bots:
+            return False
+        bots.sort()
+        return bots[0] == bot
+
+    def get_bots_by_channel(self, channel):
+        if type(channel) in [unicode, Channel]:
+            channel = self.encode(channel)
+        return [_ for _ in self.bots if channel in _.channels]
+
     def get_channel(self, channel):
         """Return ircbot.Channel instance."""
         if type(channel) == unicode:
             channel = self.encode(channel)
-        return self.bot.channels.get(channel, None)
+        for bot in self.bots:
+            if channel in bot.channels:
+                return bot.channels[channel]
+        return None
 
-    def is_one_of_us(self, nickname):
-        # TODO: multiple bot
-        nicknames = [bot.connection.get_nickname() for bot in [self.bot]]
-        return nickname in nicknames
+    def get_oper(self, channel):
+        if type(channel) in [unicode, Channel]:
+            channel = self.encode(channel)
+        for bot in self.get_bots_by_channel():
+            if channel.is_oper(bot.connection.get_nickname()):
+                return bot
+        return None
 
     def get_nickname(self):
         """Return the bot's nickname in the server."""
-        # TODO: multiple bot
         return self.bot.connection.get_nickname()
- 
+
+    def push_packet(self, packet):
+        print '*** push_packet (global) ***'
+        print packet
+        # XXX
+        if packet.command == 'privmsg':
+            target, msg = packet.arguments
+            if irclib.is_channel(target) and not self.get_bots_by_channel(target):
+                self.buffer.push(Packet(command='join',
+                                        arguments=(target,),
+                                        timestamp=0))
+        self.buffer.push(packet)
+
 class Handler(object):
     def handle(self, connection, event):
         raise NotImplemented
@@ -149,14 +203,18 @@ class Handler(object):
 class StandardPipe(Handler):
     def __init__(self, servers, channels):
         self.servers = servers
+        """self.channels[server][channel][server] = channel
+        """
         self.channels = collections.defaultdict(dict)
         for channel in channels:
             channel_map = self._channel_map(servers, channel)
             for i, server in enumerate(servers):
-                if type(channel) in [str, unicode]:
-                    key = channel
-                else:
+                if type(channel) in [list, tuple]:
                     key = channel[i]
+                else:
+                    key = channel
+                if type(channel) in [str, unicode]:
+                    key = Channel(key)
                 self.channels[server][key] = channel_map
 
     def _channel_map(self, servers, channel):
@@ -167,52 +225,67 @@ class StandardPipe(Handler):
         """
         result = {}
         for i, server in enumerate(servers):
-            if type(channel) in [str, unicode]:
+            if type(channel) in [list, tuple]:
+                if channel[i]: # allow to be empty
+                    result[server] = channel[i]
+            else:
                 result[server] = channel
-            elif channel[i]: # allow to be empty
-                result[server] = channel[i]
         return result
 
-    def attach_handler(self, server):
+    def attach_handler(self, bot):
         def _on_connected(connection, event):
+            server = bot.server
             for channel in self.channels[server].keys():
-                channel = channel.encode(server.encoding)
+                if type(channel) == Channel:
+                    weight = channel.weight
+                else:
+                    weight = 1
+                if len(server.get_bots_by_channel(channel)) >= weight:
+                    continue
+                channel = server.encode(channel)
                 packet = Packet(command='join', arguments=(channel,))
-                server.bot.push_packet(packet)
-        server.bot.connection.add_global_handler('created', _on_connected)
+                bot.push_packet(packet)
+        bot.connection.add_global_handler('created', _on_connected)
         def _handler(_, event):
-            self.handle(server, event)
-        server.bot.connection.add_global_handler('action', _handler, 0)
-        server.bot.connection.add_global_handler('join', _handler, 0)
-        server.bot.connection.add_global_handler('kick', _handler, 0)
-        server.bot.connection.add_global_handler('mode', _handler, 0)
-        server.bot.connection.add_global_handler('part', _handler, 0)
-        server.bot.connection.add_global_handler('privmsg', _handler, 0)
-        server.bot.connection.add_global_handler('privnotice', _handler, 0)
-        server.bot.connection.add_global_handler('pubmsg', _handler, 0)
-        server.bot.connection.add_global_handler('pubnotice', _handler, 0)
-        server.bot.connection.add_global_handler('topic', _handler, 0)
+            self.handle(bot, event)
+        bot.connection.add_global_handler('action', _handler, 0)
+        bot.connection.add_global_handler('join', _handler, 0)
+        bot.connection.add_global_handler('kick', _handler, 0)
+        bot.connection.add_global_handler('mode', _handler, 0)
+        bot.connection.add_global_handler('part', _handler, 0)
+        bot.connection.add_global_handler('privmsg', _handler, 0)
+        bot.connection.add_global_handler('privnotice', _handler, 0)
+        bot.connection.add_global_handler('pubmsg', _handler, 0)
+        bot.connection.add_global_handler('pubnotice', _handler, 0)
+        bot.connection.add_global_handler('topic', _handler, 0)
         # "global" relay, where no target is specified
         # it should be called before each of bot.channels is updated, hence -11
-        server.bot.connection.add_global_handler('nick', _handler, -11)
-        server.bot.connection.add_global_handler('quit', _handler, -11)
+        bot.connection.add_global_handler('nick', _handler, -11)
+        bot.connection.add_global_handler('quit', _handler, -11)
 
-    def handle(self, server, event):
+    def handle(self, bot, event):
+        server = bot.server
         if server not in self.servers:
             return
         target = event.target()
         try:
             if irclib.is_channel(target):
-                handled = self.handle_channel_event(server, event)
+                handled = self.handle_channel_event(bot, event)
             else:
-                handled = self.handle_private_event(server, event)
+                handled = self.handle_private_event(bot, event)
         except:
             traceback.print_exc()
             handled = False
         if not handled:
             util.trace('Unhandled message: %s' % self.repr_event(event))
 
-    def handle_channel_event(self, server, event):
+    def handle_channel_event(self, bot, event):
+        server = bot.server
+        target = event.target()
+        if not self.check_channel(bot, target):
+            return False
+        channel = server.decode(target)
+        channel_obj = server.get_channel(target)
         source = event.source()
         if not source:
             nickname = ''
@@ -222,11 +295,6 @@ class StandardPipe(Handler):
                 return False
         if server.is_one_of_us(nickname):
             return False
-        target = event.target()
-        if not self.check_channel(server, target):
-            return False
-        channel = server.decode(target)
-        channel_obj = server.get_channel(target)
         arg = event.arguments()
         msg = None
         eventtype = event.eventtype().lower()
@@ -265,10 +333,11 @@ class StandardPipe(Handler):
             args = (target_server.encode(target_channel),
                     target_server.encode(msg))
             packet = Packet(command='privmsg', arguments=args)
-            target_server.bot.push_packet(packet)
+            target_server.push_packet(packet)
         return True
 
-    def handle_private_event(self, server, event):
+    def handle_private_event(self, bot, event):
+        server = bot.server
         nickname = irclib.nm_to_n(event.source() or '')
         if server.is_one_of_us(nickname):
             return False
@@ -280,23 +349,24 @@ class StandardPipe(Handler):
             return False
         cmd = cmd[1:]
         if cmd == 'who':
-            return self.handle_who(server, event, arg)
+            return self.handle_who(bot, event, arg)
         if cmd == 'whois':
-            return self.handle_whois(server, event, arg)
+            return self.handle_whois(bot, event, arg)
         if cmd == 'topic':
-            return self.handle_topic(server, event, arg)
+            return self.handle_topic(bot, event, arg)
         elif cmd == 'op':
             pass # TODO
         elif cmd == 'aop':
-            return self.handle_aop(server, event, arg)
+            return self.handle_aop(bot, event, arg)
         return False
 
-    def handle_who(self, server, event, arg):
-        if not self.check_channel(server, arg):
+    def handle_who(self, bot, event, arg):
+        if not self.check_channel(bot, arg):
             return False
+        server = bot.server
         nickname = irclib.nm_to_n(event.source() or '')
         channel = server.decode(arg)
-        channel_obj = server.bot.channels.get(arg, None)
+        channel_obj = server.get_channel(channel)
         if not channel_obj.has_user(nickname):
             # or (not channel_there.is_secret())
             return False
@@ -317,10 +387,10 @@ class StandardPipe(Handler):
                 command = 'privmsg',
                 arguments = (nickname, msg)
             )
-            server.bot.push_packet(packet)
+            bot.push_packet(packet)
         return True
 
-    def handle_whois(self, server, event, arg):
+    def handle_whois(self, bot, event, arg):
         """shows whois information from the other sides.
         Usage: /msg uniko \whois nickname
                where nickname is the nickname in each of the servers other
@@ -329,13 +399,14 @@ class StandardPipe(Handler):
         # TODO: asynchronous
         return False
 
-    def handle_topic(self, server, event, arg):
+    def handle_topic(self, bot, event, arg):
         # TODO: asynchronous
         return False
 
-    def handle_aop(self, server, event, arg):
-        if not self.check_channel(server, arg):
+    def handle_aop(self, bot, event, arg):
+        if not self.check_channel(bot, arg):
             return False
+        server = bot.server
         nickname = irclib.nm_to_n(event.source() or '')
         channel = server.decode(arg)
         for target_server in self.servers:
@@ -344,8 +415,8 @@ class StandardPipe(Handler):
             target_channel = self.channels[server][channel][target_server]
             target_channel = target_server.encode(target_channel)
             target_channel_obj = target_server.get_channel(target_channel)
-            if not target_channel_obj.is_oper(target_server.get_nickname()):
-                # TODO: multiple bot
+            target_bot = target_server.get_oper(target_channel)
+            if not target_bot:
                 continue
             members = set(target_channel_obj.users())
             members = members.difference(target_channel_obj.opers())
@@ -355,26 +426,23 @@ class StandardPipe(Handler):
                     command = 'mode',
                     arguments = mode_string
                 )
-                target_server.bot.push_packet(packet)
+                target_bot.push_packet(packet)
             msg = ' '.join(members)
             msg = server.encode(target_server.decode(msg))
             packet = Packet(
                 command = 'privmsg',
                 arguments = (nickname, msg)
             )
-            server.bot.push_packet(packet)
+            bot.push_packet(packet)
         return True
 
-    def check_channel(self, server, channel):
-        """checks if this should listen to the channel in the server."""
-        if not irclib.is_channel(channel):
-            return False
-        channel_obj = server.get_channel(channel)
-        if not channel_obj:
-            return False
-        channel = server.decode(channel)
-        if channel not in self.channels[server]:
-            return False
+    def check_channel(self, bot, channel):
+        """checks if this should listen to the bot from the channel."""
+        if not bot.server.is_listening_bot(bot, channel):
+            return False # not the channel's listening bot
+        channel = bot.server.decode(channel)
+        if channel not in self.channels[bot.server]:
+            return False # not in the pipe's chnnel list
         return True
 
     def repr_nickname(self, nickname, channel_obj):
@@ -422,7 +490,8 @@ class BufferingBot(ircbot.SingleServerIRCBot):
                  reconnection_interval=60, use_ssl=False):
         ircbot.SingleServerIRCBot.__init__(self, server_list, nickname,
                                            realname, reconnection_interval)
-        self.connection.add_global_handler('created', self._on_connected)
+        self.connection.add_global_handler('endofmotd', self._on_connected)
+        #self.connection.add_global_handler('created', self._on_connected)
         self.use_ssl = use_ssl
         self.buffer = PacketBuffer(10.0)
 
@@ -450,6 +519,8 @@ class BufferingBot(ircbot.SingleServerIRCBot):
         self.ircobj.execute_delayed(0.1, self.flood_control)
 
     def pop_packet(self):
+        if not self.connection.is_connected():
+            return
         if len(self.buffer):
             packet = self.buffer.pop()
         elif len(self.global_buffer):
@@ -481,33 +552,31 @@ class BufferingBot(ircbot.SingleServerIRCBot):
             self.global_buffer.push(packet)
 
 class UnikoBot():
-    def __init__(self, nickname='uniko'):
-        self.nickname = nickname
+    def __init__(self):
         self.servers = set()
 
-    def add_server(self, server):
-        if server not in self.servers:
-            self.servers.add(server)
-            server.bot = BufferingBot(
-                server.server_list,
-                self.nickname,
-                'Uniko',
-                reconnection_interval = 600,
-                use_ssl = server.use_ssl
-            )
-            server.bot.set_global_buffer(server.buffer)
+    def add_server(self, server, nicknames):
+        self.servers.add(server)
+        for nickname in nicknames:
+            server.add_bot(nickname=nickname)
 
     def add_pipe(self, pipe):
         for server in pipe.servers:
-            self.add_server(server)
-            pipe.attach_handler(server)
+            self.add_server(server, [])
+            for bot in server.bots:
+                pipe.attach_handler(bot)
 
     def start(self):
         for server in self.servers:
-            server.bot._connect()
+            for bot in server.bots:
+                print 'Connecting to', server.server_list
+                bot._connect()
         while True:
             for server in self.servers:
-                server.bot.ircobj.process_once(0.2)
+                for bot in server.bots:
+                    bot.ircobj.process_once(0.2)
+
+#irclib.DEBUG = 1
 
 # vim: et ts=4 sts=4 sw=4
 

@@ -1,6 +1,5 @@
 import time
 import itertools
-import chardet
 
 def trace(str):
     print '[%s] %s' % (time.strftime('%m %d %H:%M:%S'), str)
