@@ -207,6 +207,10 @@ class StandardPipe(Handler):
         """
         self.channels = collections.defaultdict(dict)
         for channel in channels:
+#            if type(channel) is Channel:
+#                channel.name = irclib.irc_lower(channel.name)
+#            else:
+#                channel = irclib.irc_lower(channel)
             channel_map = self._channel_map(servers, channel)
             for i, server in enumerate(servers):
                 if type(channel) in [list, tuple]:
@@ -361,6 +365,7 @@ class StandardPipe(Handler):
         return False
 
     def handle_who(self, bot, event, arg):
+        arg = irclib.irc_lower(arg.strip())
         if not self.check_channel(bot, arg):
             return False
         server = bot.server
@@ -384,8 +389,8 @@ class StandardPipe(Handler):
                  self.repr_nicklist(target_channel_obj))
             msg = server.encode(target_server.decode(msg))
             packet = Packet(
-                command = 'privmsg',
-                arguments = (nickname, msg)
+                command='privmsg',
+                arguments=(nickname, msg)
             )
             bot.push_packet(packet)
         return True
@@ -396,6 +401,7 @@ class StandardPipe(Handler):
                where nickname is the nickname in each of the servers other
                than the user is in.
         """
+        arg = arg.strip()
         # TODO: asynchronous
         return False
 
@@ -404,11 +410,13 @@ class StandardPipe(Handler):
         return False
 
     def handle_aop(self, bot, event, arg):
+        arg = irclib.irc_lower(arg.strip())
         if not self.check_channel(bot, arg):
             return False
         server = bot.server
         nickname = irclib.nm_to_n(event.source() or '')
         channel = server.decode(arg)
+        # TODO: asynchronous?
         for target_server in self.servers:
             if target_server == server:
                 continue
@@ -423,26 +431,26 @@ class StandardPipe(Handler):
             for _ in util.partition(members.__iter__(), 4): # XXX
                 mode_string = '+%s %s' % ('o' * len(_), ' '.join(_))
                 packet = Packet(
-                    command = 'mode',
-                    arguments = mode_string
+                    command='mode',
+                    arguments=(target_channel, mode_string)
                 )
                 target_bot.push_packet(packet)
             msg = ' '.join(members)
             msg = server.encode(target_server.decode(msg))
             packet = Packet(
-                command = 'privmsg',
-                arguments = (nickname, msg)
+                command='privmsg',
+                arguments=(nickname, msg)
             )
             bot.push_packet(packet)
         return True
 
     def check_channel(self, bot, channel):
-        """checks if this should listen to the bot from the channel."""
+        """checks if the channel should be handled by self."""
         if not bot.server.is_listening_bot(bot, channel):
             return False # not the channel's listening bot
         channel = bot.server.decode(channel)
         if channel not in self.channels[bot.server]:
-            return False # not in the pipe's chnnel list
+            return False # not in the pipe's channel list
         return True
 
     def repr_nickname(self, nickname, channel_obj):
@@ -489,10 +497,10 @@ class BufferingBot(ircbot.SingleServerIRCBot):
     def __init__(self, server_list, nickname, realname,
                  reconnection_interval=60, use_ssl=False):
         ircbot.SingleServerIRCBot.__init__(self, server_list, nickname,
-                                           realname, reconnection_interval)
+                                           realname, reconnection_interval,
+                                           use_ssl)
         self.connection.add_global_handler('endofmotd', self._on_connected)
         #self.connection.add_global_handler('created', self._on_connected)
-        self.use_ssl = use_ssl
         self.buffer = PacketBuffer(10.0)
 
     def _on_connected(self, connection, event):
@@ -530,12 +538,22 @@ class BufferingBot(ircbot.SingleServerIRCBot):
         if not packet:
             return
         try:
-            if packet.command == 'privmsg':
+            if False:
+                pass
+            elif packet.command == 'join':
+                self.connection.join(*packet.arguments)
+            elif packet.command == 'mode':
+                self.connection.mode(*packet.arguments)
+            elif packet.command == 'privmsg':
                 self.connection.privmsg(*packet.arguments)
             elif packet.command == 'privnotice':
                 self.connection.privnotice(*packet.arguments)
-            elif packet.command == 'join':
-                self.connection.join(*packet.arguments)
+            elif packet.command == 'topic':
+                self.connection.topic(*packet.arguments)
+            elif packet.command == 'who':
+                self.connection.who(*packet.arguments)
+            elif packet.command == 'whois':
+                self.connection.whois(*packet.arguments)
         except irclib.ServerNotConnectedError:
             self.push_packet(packet)
             self._connect()
