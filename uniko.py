@@ -31,10 +31,15 @@ class Packet():
         """Tell whether the packet is bot-specific.
         If not, any other bot connected to the server may handle it.
         """
-        if self.command in ['join']:
+        if self.command in ['join', 'mode']:
             return True
         elif self.command in ['privmsg', 'privnotice']:
             return irclib.is_channel(self.arguments[0])
+        return False
+
+    def is_system_message(self):
+        if self.command in ['privmsg', 'privnotice']:
+            return self.arguments[1].startswith('--') # XXX
         return False
 
 class PacketBuffer(object):
@@ -78,7 +83,7 @@ class PacketBuffer(object):
                     traceback.print_exc()
                     self.push(packet)
                     return
-                if not message.startswith('--'): # XXX
+                if not packet.is_system_message():
                     line_counts[target] += 1
         for target, line_count in line_counts.iteritems():
             message = "-- Message lags over %f seconds. Skipping %d line(s).." \
@@ -91,6 +96,8 @@ class PacketBuffer(object):
 
 class Channel(object):
     def __init__(self, name, weight=1):
+        """name -- channel name in unicode
+        """
         self.name = name
         self.weight = weight
 
@@ -110,7 +117,7 @@ class Channel(object):
 
 class Server(object):
     """Stores information about an IRC network.
-    Also works as a packet buffer when the bot is running.
+    Also works as a packet buffer when the bots are running.
     """
 
     def __init__(self, server_list, encoding, use_ssl=False):
@@ -133,7 +140,7 @@ class Server(object):
             self.server_list,
             nickname,
             'Uniko',
-            reconnection_interval = 600,
+            reconnection_interval = 60,
             use_ssl = self.use_ssl)
         bot.set_global_buffer(self.buffer)
         bot.server = self
@@ -144,7 +151,8 @@ class Server(object):
         return nickname in nicknames
 
     def is_listening_bot(self, bot, channel):
-        """Tell whether the bot is the listening bot for the channel."""
+        """Tell whether the bot is on of the "listening bots" for the channel.
+        """
         if not irclib.is_channel(channel):
             return False # not even a channel
         if bot not in self.bots:
@@ -158,6 +166,7 @@ class Server(object):
     def get_bots_by_channel(self, channel):
         if type(channel) in [unicode, Channel]:
             channel = self.encode(channel)
+        # TODO: sync weight
         return [_ for _ in self.bots if channel in _.channels]
 
     def get_channel(self, channel):
@@ -172,8 +181,12 @@ class Server(object):
     def get_oper(self, channel):
         if type(channel) in [unicode, Channel]:
             channel = self.encode(channel)
-        for bot in self.get_bots_by_channel():
-            if channel.is_oper(bot.connection.get_nickname()):
+        for bot in self.bots:
+            # TODO: sync weight
+            if channel not in bot.channels:
+                continue
+            channel_obj = bot.channels[channel]
+            if channel_obj.is_oper(bot.connection.get_nickname()):
                 return bot
         return None
 
@@ -182,8 +195,6 @@ class Server(object):
         return self.bot.connection.get_nickname()
 
     def push_packet(self, packet):
-        print '*** push_packet (global) ***'
-        print packet
         # XXX
         if packet.command == 'privmsg':
             target, msg = packet.arguments
@@ -204,7 +215,7 @@ class StandardPipe(Handler):
     def __init__(self, servers, channels):
         self.servers = servers
         """self.channels[server][channel][server] = channel
-        """
+        """ # XXX
         self.channels = collections.defaultdict(dict)
         for channel in channels:
 #            if type(channel) is Channel:
@@ -286,6 +297,8 @@ class StandardPipe(Handler):
     def handle_channel_event(self, bot, event):
         server = bot.server
         target = event.target()
+        if not bot.server.is_listening_bot(bot, target):
+            return False # not the channel's listening bot
         if not self.check_channel(bot, target):
             return False
         channel = server.decode(target)
@@ -369,9 +382,9 @@ class StandardPipe(Handler):
         if not self.check_channel(bot, arg):
             return False
         server = bot.server
-        nickname = irclib.nm_to_n(event.source() or '')
         channel = server.decode(arg)
         channel_obj = server.get_channel(channel)
+        nickname = irclib.nm_to_n(event.source() or '')
         if not channel_obj.has_user(nickname):
             # or (not channel_there.is_secret())
             return False
@@ -445,9 +458,7 @@ class StandardPipe(Handler):
         return True
 
     def check_channel(self, bot, channel):
-        """checks if the channel should be handled by self."""
-        if not bot.server.is_listening_bot(bot, channel):
-            return False # not the channel's listening bot
+        """check if the channel should be handled by self."""
         channel = bot.server.decode(channel)
         if channel not in self.channels[bot.server]:
             return False # not in the pipe's channel list
@@ -562,8 +573,6 @@ class BufferingBot(ircbot.SingleServerIRCBot):
             self.push_packet(packet)
 
     def push_packet(self, packet):
-        print '*** push_packet ***'
-        print packet
         if packet.is_bot_specific():
             self.buffer.push(packet)
         else:
@@ -594,7 +603,5 @@ class UnikoBot():
                 for bot in server.bots:
                     bot.ircobj.process_once(0.2)
 
-#irclib.DEBUG = 1
-
-# vim: et ts=4 sts=4 sw=4
+# vim: ai et ts=4 sts=4 sw=4
 
