@@ -15,9 +15,9 @@ def main():
             ]
         ),
     ]
-    uniko = UnikoBot(
-        nickname = u'uniko'
-    )
+    uniko = UnikoBot()
+    uniko.add_server(HANIRC, nicknames=['uniko'])
+    uniko.add_server(FREENODE, nicknames=['uniko'])
     for pipe in pipes:
         uniko.add_pipe(pipe)
     uniko.start()
