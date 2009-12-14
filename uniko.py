@@ -9,7 +9,11 @@ import traceback
 
 import util
 
-"""Uniko's main module"""
+"""Uniko's main module
+
+Note - Everything is thread-unsafe.
+       Why use thread anyway -- this project is a mere contraption!
+"""
 
 class Packet():
     def __init__(self, command, arguments, timestamp=None):
@@ -43,9 +47,14 @@ class Packet():
         return False
 
 class PacketBuffer(object):
+    """Buffer of Packet objects, sorted by their timestamp.
+    If some of its Packet's timestamp lags over self.timeout, it purges all the queue.
+    Note that this uses heapq mechanism hence thread-unsafe.
+    """
+
     def __init__(self, timeout=10.0):
         self.timeout = timeout
-        self.heap = [] # Do we need thread safety here?
+        self.heap = []
 
     def __len__(self):
         return len(self.heap)
@@ -241,7 +250,7 @@ class StandardPipe(Handler):
         result = {}
         for i, server in enumerate(servers):
             if type(channel) in [list, tuple]:
-                if channel[i]: # allow to be empty
+                if channel[i]: # allow to be None
                     result[server] = channel[i]
             else:
                 result[server] = channel
@@ -277,6 +286,23 @@ class StandardPipe(Handler):
         # it should be called before each of bot.channels is updated, hence -11
         bot.connection.add_global_handler('nick', _handler, -11)
         bot.connection.add_global_handler('quit', _handler, -11)
+
+    def sync(self):
+        # TODO: implement
+        for server in self.channels.keys():
+            for channel in self.channels[server].keys():
+                if type(channel) == Channel:
+                    weight = channel.weight
+                else:
+                    weight = 1
+                bots = server.get_bots_by_channel(channel)
+                if len(bots) < weight:
+                    for _ in xrange(weight - len(bots)):
+                        pass
+                elif len(bots) > weight:
+                    #for bot in bots:
+                    for _ in xrange(len(bots) - weights):
+                        pass
 
     def handle(self, bot, event):
         server = bot.server
@@ -397,7 +423,7 @@ class StandardPipe(Handler):
             target_channel_obj = target_server.get_channel(target_channel)
             if target_channel_obj is None:
                 continue
-            members = channel_obj.users()
+            members = target_channel_obj.users()
             msg = 'Total %d in %s: %s' % (len(members), target_channel,
                  self.repr_nicklist(target_channel_obj))
             msg = server.encode(target_server.decode(msg))
@@ -510,32 +536,42 @@ class BufferingBot(ircbot.SingleServerIRCBot):
         ircbot.SingleServerIRCBot.__init__(self, server_list, nickname,
                                            realname, reconnection_interval,
                                            use_ssl)
-        self.connection.add_global_handler('endofmotd', self._on_connected)
-        #self.connection.add_global_handler('created', self._on_connected)
         self.buffer = PacketBuffer(10.0)
-
-    def _on_connected(self, connection, event):
-        self.ircobj.execute_delayed(0, self.flood_control)
+        self.ircobj.execute_delayed(0, self.on_tick)
 
     def set_global_buffer(self, buffer):
         self.global_buffer = buffer
 
+    @util.periodic(0.1)
+    def on_tick(self):
+        if not self.connection.is_connected():
+            return
+        self.flood_control()
+
     def flood_control(self):
+        """Delays message according to the length of packet.
+        Obviously this doesn't utilize any lock hence thread-unsafe.
+        """
+        packet = None
         if len(self.buffer):
             packet = self.buffer.peek()
         elif len(self.global_buffer):
             packet = self.global_buffer.peek()
-        else:
-            packet = None
-        if packet is not None:
-            delay = 2
-            if packet.command == 'privmsg':
-                msg = packet.arguments[1]
-                delay = 0.5 + len(msg) / 35.
-            if delay > 4:
-                delay = 4
-            self.ircobj.execute_delayed(delay, self.pop_packet)
-        self.ircobj.execute_delayed(0.1, self.flood_control)
+        if packet is None:
+            return
+        delay = 2
+        if packet.command == 'privmsg':
+            try:
+                target, msg = packet.arguments
+            except:
+                traceback.print_exc()
+                return
+            if target not in self.channels:
+                return
+            delay = 0.5 + len(msg) / 35.
+        if delay > 4:
+            delay = 4
+        self.ircobj.execute_delayed(delay, self.pop_packet) # XXX
 
     def pop_packet(self):
         if not self.connection.is_connected():

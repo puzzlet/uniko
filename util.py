@@ -27,3 +27,19 @@ def partition(iterable, count):
         if result:
             yield result
 
+def periodic(period):
+    """Decorate a class instance method so that the method would be
+    periodically executed by irclib framework.
+    Raising StopIteration stops periodic execution from inside.
+    """
+    def decorator(f):
+        def new_f(self, *args):
+            try:
+                f(self, *args)
+            except StopIteration:
+                return
+            finally:
+                self.ircobj.execute_delayed(period, new_f, (self,) + args)
+        return new_f
+    return decorator
+
