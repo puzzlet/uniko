@@ -1,0 +1,41 @@
+# coding: utf-8
+{
+    'version': 2010010101, # increment this and save to reload
+    'network': [
+        {
+            'name': 'freenode',
+            'encoding': 'utf8',
+            'server': [
+                ('irc.freenode.net', 6667),
+            ],
+        },
+        {
+            'name': 'ozinger',
+            'encoding': 'utf8',
+            'server': [
+                ('irc.ozinger.org', 6667),
+            ],
+        },
+        {
+            'name': 'hanirc',
+            'encoding': 'cp949',
+            'server': [
+                ('irc.hanirc.org', 6667),
+            ],
+        },
+    ],
+    'bot': [
+        { 'network': 'hanirc', 'nickname': 'uniko', },
+        { 'network': 'hanirc', 'nickname': 'uniko2', },
+        { 'network': 'freenode', 'nickname': 'uniko', },
+        { 'network': 'freenode', 'nickname': 'uniko2', },
+    ],
+    'pipe': [
+        { 'network': ['hanirc', 'freenode'], 'channel': u'#uniko', },
+        { 'network': ['hanirc', 'freenode'], 'channel': u'#uniko-multiple', 'weight': 2, },
+        { 'network': ['hanirc', 'freenode'], 'channel': [u'#uniko-hanirc', u'#uniko-freenode', ], },
+    ],
+
+}
+
+# vim: et ts=4 sts=4 sw=4 ft=python
