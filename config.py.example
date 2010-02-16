@@ -22,6 +22,7 @@
             'server': [
                 ('irc.hanirc.org', 6667),
             ],
+            'buffer_timeout': 30.0,
         },
     ],
     'bot': [

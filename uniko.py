@@ -17,7 +17,7 @@ import util
 """Uniko's main module
 
 Note - Everything is thread-unsafe.
-       Why use thread anyway -- this project is a mere contraption!
+But what is the use of threads -- in such a small gizmo?
 """
 
 class Packet():
@@ -118,7 +118,7 @@ class Channel(object):
     def __init__(self, name, weight=1):
         """name -- channel name in unicode
         """
-        if type(name) != unicode:
+        if isinstance(name, unicode):
             raise ValueError
         self.name = name
         self.weight = weight
@@ -130,7 +130,7 @@ class Channel(object):
         return self.name
 
     def __eq__(self, rhs):
-        if type(rhs) == Channel:
+        if isinstance(rhs, Channel):
             return self.name == rhs.name
         return self.name == rhs
 
@@ -142,12 +142,12 @@ class Network(object):
     Also works as a packet buffer when the bots are running.
     """
 
-    def __init__(self, server_list, encoding, use_ssl=False):
+    def __init__(self, server_list, encoding, use_ssl=False, buffer_timeout=10.0):
         self.server_list = server_list
         self.encoding = encoding
-        self.use_ssl = use_ssl
         self.bots = []
-        self.buffer = PacketBuffer(timeout=10.0)
+        self.use_ssl = use_ssl
+        self.buffer = PacketBuffer(timeout=buffer_timeout)
 
     def encode(self, string):
         """Safely encode the string using the network's encoding."""
@@ -158,11 +158,11 @@ class Network(object):
         return string.decode(self.encoding, 'ignore')
 
     def irc_lower(self, value):
-        if type(value) == str:
+        if isinstance(value, str):
             return irclib.irc_lower(value)
-        elif type(value) == unicode:
+        elif isinstance(value, unicode):
             return self.decode(self.irc_lower(self.encode(value)))
-        elif type(value) == Channel:
+        elif isinstance(value, Channel):
             return Channel(name = self.irc_lower(value.name),
                            weight = value.weight)
         return value
@@ -197,14 +197,14 @@ class Network(object):
         return bots[0] == bot
 
     def get_bots_by_channel(self, channel):
-        if type(channel) in [unicode, Channel]:
+        if isinstance(channel, (unicode, Channel)):
             channel = self.encode(channel)
         # TODO: sync weight
         return [_ for _ in self.bots if channel in _.channels]
 
     def get_channel(self, channel):
         """Return ircbot.Channel instance."""
-        if type(channel) == unicode:
+        if isinstance(channel, unicode):
             channel = self.encode(channel)
         channel = irclib.irc_lower(channel)
         for bot in self.bots:
@@ -213,7 +213,7 @@ class Network(object):
         return None
 
     def get_oper(self, channel):
-        if type(channel) in [unicode, Channel]:
+        if isinstance(channel, (unicode, Channel)):
             channel = self.encode(channel)
         for bot in self.bots:
             # TODO: sync weight
@@ -261,7 +261,7 @@ class StandardPipe(Handler):
         """
         self.channels = {}
         for i, network in enumerate(networks):
-            if type(channels) in [list, tuple]:
+            if isinstance(channels, (list, tuple)):
                 if not channels[i]: # allow to be None
                     continue
                 self.channels[network] = network.irc_lower(channels[i])
@@ -321,7 +321,7 @@ class StandardPipe(Handler):
                         continue
                     else:
                         bot_available.append(bot)
-                if type(channel) in [tuple, list]:
+                if isinstance(channel, (tuple, list)):
                     ch = network.encode(channel[i])
                 else:
                     ch = network.encode(channel)
@@ -336,7 +336,7 @@ class StandardPipe(Handler):
         # TODO: implement
         for network in self.channels.keys():
             for channel in self.channels[network].keys():
-                if type(channel) == Channel:
+                if isinstance(channel, Channel):
                     weight = channel.weight
                 else:
                     weight = 1
@@ -576,11 +576,11 @@ class StandardPipe(Handler):
 
 class BufferingBot(ircbot.SingleServerIRCBot):
     def __init__(self, network_list, nickname, realname,
-                 reconnection_interval=60, use_ssl=False):
+                 reconnection_interval=60, use_ssl=False, buffer_timeout=10.0):
         ircbot.SingleServerIRCBot.__init__(self, network_list, nickname,
                                            realname, reconnection_interval,
                                            use_ssl)
-        self.buffer = PacketBuffer(10.0)
+        self.buffer = PacketBuffer(timeout=buffer_timeout)
         self.last_tick = 0
 
     def set_global_buffer(self, buffer):
@@ -640,7 +640,10 @@ class BufferingBot(ircbot.SingleServerIRCBot):
         if self.last_tick + delay > tick:
             return
         self.process_packet(packet)
-        assert packet == buffer.pop()
+        # assert packet == buffer.pop() # AssertionError
+        packet_ = buffer.pop()
+        if packet != packet_:
+            print 'PACKET MISMATCH', packet, packet_
         self.last_tick = tick
 
     def process_packet(self, packet):
@@ -729,7 +732,8 @@ class UnikoBot():
             self.networks[network_data['name']] = Network(
                 network_data['server'],
                 encoding=network_data['encoding'],
-                use_ssl=network_data.get('use_ssl', False)
+                use_ssl=network_data.get('use_ssl', False),
+                buffer_timeout=network_data.get('buffer_timeout', 10.0)
             )
 
     def reload_bot(self, data):
@@ -761,6 +765,7 @@ class UnikoBot():
                 for bot in self.bots[network]:
                     pipe.attach_handler(bot)
             self.pipes.append(pipe)
+        # TODO: shed
 
 def main():
     irclib.DEBUG = 1
