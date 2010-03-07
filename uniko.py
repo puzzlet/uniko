@@ -13,57 +13,21 @@ import collections
 import traceback
 
 import irclib
-import BufferingBot
+from BufferingBot import Message, MessageBuffer, BufferingBot
 
 import util
-
-class Message(BufferingBot.Message):
-
-    def is_bot_specific(self):
-        """Tell whether the message is bot-specific.
-        If not, any other bot connected to the server may handle it.
-        """
-        if self.command in ['join', 'mode']:
-            return True
-        elif self.command in ['privmsg', 'privnotice']:
-            return irclib.is_channel(self.arguments[0])
-        return False
-
-class Channel(object):
-    def __init__(self, name, weight=1):
-        """name -- channel name in str
-        """
-        if isinstance(name, str):
-            raise ValueError
-        self.name = name
-        self.weight = weight
-
-    def __hash__(self):
-        return hash(self.name)
-
-    def __unicode__(self):
-        return self.name
-
-    def __eq__(self, rhs):
-        if isinstance(rhs, Channel):
-            return self.name == rhs.name
-        return self.name == rhs
-
-    def encode(self, *_):
-        return self.name.encode(*_)
 
 class Network(object):
     """Stores information about an IRC network.
     Also works as a message buffer when the bots are running.
     """
 
-    def __init__(self, server_list, encoding, use_ssl=False,
-                 buffer_timeout=10.0):
+    def __init__(self, server_list, name, encoding, use_ssl=False):
         self.server_list = server_list
+        self.name = name
         self.encoding = encoding
         self.bots = []
         self.use_ssl = use_ssl
-        self.buffer = BufferingBot.MessageBuffer(timeout=buffer_timeout)
 
     def encode(self, string):
         """Safely encode the string using the network's encoding."""
@@ -73,29 +37,18 @@ class Network(object):
         """Safely decode the byte string using the network's encoding."""
         return string.decode(self.encoding, 'ignore')
 
-    def irc_lower(self, value):
-        if isinstance(value, str):
-            return irclib.irc_lower(value)
-        elif isinstance(value, str):
-            return self.decode(self.irc_lower(self.encode(value)))
-        elif isinstance(value, Channel):
-            return Channel(name = self.irc_lower(value.name),
-                           weight = value.weight)
-        return value
-
     def add_bot(self, nickname):
         bot = UnikoBufferingBot(
-            self.server_list,
+            self,
             self.encode(nickname),
             b'Uniko the bot',
-            reconnection_interval = 60,
-            use_ssl = self.use_ssl)
-        bot.set_global_buffer(self.buffer)
-        bot.network = self
+#            reconnection_interval=60,
+            use_ssl=self.use_ssl)
         self.bots.append(bot)
         return bot
 
     def is_one_of_us(self, nickname):
+        """Tell whether the nickname belongs to one of self.bots."""
         assert isinstance(nickname, bytes)
         nicknames = [bot.connection.get_nickname() for bot in self.bots]
         return nickname in nicknames
@@ -114,9 +67,8 @@ class Network(object):
         return bots[0] == bot
 
     def get_bots_by_channel(self, channel):
-        if isinstance(channel, (str, Channel)):
+        if isinstance(channel, str):
             channel = self.encode(channel)
-        # TODO: sync weight
         return [_ for _ in self.bots if channel in _.channels]
 
     def get_channel(self, channel):
@@ -130,10 +82,9 @@ class Network(object):
         return None
 
     def get_oper(self, channel):
-        if isinstance(channel, (str, Channel)):
+        if isinstance(channel, str):
             channel = self.encode(channel)
         for bot in self.bots:
-            # TODO: sync weight
             if channel not in bot.channels:
                 continue
             channel_obj = bot.channels[channel]
@@ -141,34 +92,26 @@ class Network(object):
                 return bot
         return None
 
-    def push_message(self, message):
-        # XXX
-        if message.command in ['privmsg']:
-            target, _ = message.arguments
-            if irclib.is_channel(target) and \
-                not self.get_bots_by_channel(target):
-                self.buffer.push(Message(command='join',
-                                         arguments=(target,),
-                                         timestamp=0))
-        self.buffer.push(message)
-
 class StandardPipe():
-    def __init__(self, networks, channels, always=None, never=None, weight=1):
+    def __init__(self, networks, channels, always=None, never=None, weight=1,
+                 buffer_timeout=10.0):
         """
         networks -- list of networks
         channels -- either string or a list of strings.
-                   the length of the list must equal to the length of networks
+                    the length of the list must equal to the length of networks
         """
         self.networks = networks
         self.bots = []
         self.channels = {}
+        self.buffers = {}
         for i, network in enumerate(networks):
             if isinstance(channels, (list, tuple)):
                 if not channels[i]: # allow to be None
                     continue
-                self.channels[network] = network.irc_lower(channels[i])
+                self.channels[network] = irclib.irc_lower(channels[i])
             else:
-                self.channels[network] = network.irc_lower(channels)
+                self.channels[network] = irclib.irc_lower(channels)
+            self.buffers[network] = MessageBuffer(timeout=buffer_timeout)
         self.actions = set([
             'action', 'privmsg', 'privnotice', 'pubmsg', 'pubnotice',
             'kick', 'mode', 'topic',
@@ -183,7 +126,7 @@ class StandardPipe():
         self.handler_function = {}
         self.join_tick = 0
 
-    def attach_handler(self, bot):
+    def attach_handler(self, bot, network):
         def _handler(_, event):
             self.handle(bot, event)
         self.handler_function[bot] = _handler
@@ -195,43 +138,43 @@ class StandardPipe():
             else:
                 priority = 0
             bot.connection.add_global_handler(action, _handler, priority)
+        bot.add_buffer(self.buffers[network])
 
     def detach_all_handler(self):
         for bot in self.bots:
             for action in self.actions:
                 bot.connection.remove_global_handler(action,
                     self.handler_function[bot])
+            for network in self.networks:
+                bot.remove_buffer(self.buffers[network])
 
     def on_tick(self):
         tick = time.time()
+        self._sync_weight(tick)
+
+    def _sync_weight(self, tick):
+        """should only be called by self.on_tick()"""
         if self.join_tick + 2 > tick:
             return
         self.join_tick = time.time()
-        for channel in self.channels.values():
-            for i, network in enumerate(self.networks):
-                bot_joined = network.get_bots_by_channel(channel)
-                n = self.weight - len(bot_joined)
-                if n <= 0:
+        for network, channel in self.channels.items():
+            bot_joined = network.get_bots_by_channel(channel)
+            weight = self.weight - len(bot_joined)
+            if weight <= 0:
+                continue
+            bot_available = []
+            for bot in network.bots:
+                if bot in bot_joined:
                     continue
-                bot_available = []
-                for bot in network.bots:
-                    if bot in bot_joined:
-                        continue
-                    elif bot.buffer.has_buffer_by_command('join'):
-                        n -= 1
-                    elif len(bot.channels) >= 20: # XXX
-                        continue
-                    else:
-                        bot_available.append(bot)
-                if isinstance(channel, (tuple, list)):
-                    ch = network.encode(channel[i])
+                elif bot.buffer.has_buffer_by_command('join'):
+                    weight -= 1
+                elif len(bot.channels) >= 20: # XXX network's channel limit
+                    continue
                 else:
-                    ch = network.encode(channel)
-                for i in range(n):
-                    if i >= len(bot_available):
-                        break
-                    message = Message(command='join', arguments=(ch, ))
-                    bot_available[i].push_message(message)
+                    bot_available.append(bot)
+            for _, bot in zip(range(weight), bot_available):
+                bot.push_message(Message(command='join',
+                    arguments=(network.encode(channel), )))
 
     def handle(self, bot, event):
         network = bot.network
@@ -243,12 +186,9 @@ class StandardPipe():
                 handled = self.handle_channel_event(bot, event)
             else:
                 handled = self.handle_private_event(bot, event)
-        except:
+        except Exception:
             traceback.print_exc()
             handled = False
-        if not handled:
-            pass
-            # util.trace('Unhandled message: %s' % self.repr_event(event))
 
     def handle_channel_event(self, bot, event):
         network = bot.network
@@ -257,15 +197,7 @@ class StandardPipe():
             return False # not the channel's listening bot
         if not self.check_channel(bot, target):
             return False
-#        channel = network.decode(network.irc_lower(target))
-        channel_obj = network.get_channel(target)
-        source = event.source()
-        if not source:
-            nickname = b''
-        else:
-            nickname = irclib.nm_to_n(source)
-            if not nickname:
-                return False
+        nickname = irclib.nm_to_n(event.source() or '')
         if network.is_one_of_us(nickname):
             return False
         eventtype = event.eventtype().lower()
@@ -276,51 +208,56 @@ class StandardPipe():
             modes = irclib.parse_channel_modes(b' '.join(event.arguments()))
             if all(_[0] == b'+' and _[1] in b'ov' for _ in modes):
                 return False
-        arg = [network.decode(_) for _ in event.arguments()]
-        msg = self._format_event(eventtype).format(
-            rnick=network.decode(self.repr_nickname(nickname, channel_obj)),
-            nick=network.decode(nickname),
-            event=eventtype,
-            arg=arg,
-            args=' '.join(arg)
-        )
+        msg = self.format_event(bot, event)
         if not msg:
             return False
         for target_network in self.networks:
             if target_network == network:
                 continue
-            target_channel = self.channels[target_network]
-            args = (target_network.encode(target_channel),
-                    target_network.encode(msg))
-            message = Message(command='privmsg', arguments=args)
-            target_network.push_message(message)
+            chan = target_network.encode(self.channels[target_network])
+            self.push_message(target_network,
+                Message(command='privmsg',
+                    arguments=(chan, target_network.encode(msg))))
         return True
 
-    def _format_event(self, eventtype):
+    def format_event(self, bot, event):
+        network = bot.network
+        eventtype = event.eventtype().lower()
+        assert isinstance(eventtype, str)
+        nickname = irclib.nm_to_n(event.source() or '')
+        arg = [network.decode(_) for _ in event.arguments()]
         if eventtype in ['privmsg', 'pubmsg']:
-            return '<{rnick}> {arg[0]}'
+            format_str = '<{rnick}> {arg[0]}'
         elif eventtype in ['privnotice', 'pubnotice']:
-            return '>{rnick}< {arg[0]}'
+            format_str = '>{rnick}< {arg[0]}'
         elif eventtype in ['action']:
-            return '\x02* {nick}\x02 {args}'
+            format_str = '\x02* {nick}\x02 {args}'
         elif eventtype in ['join']:
-            return '! {nick} {event}'
+            format_str = '! {nick} {event}'
         elif eventtype in ['topic']:
-            return '! {nick} {event} "{arg[0]}"'
+            format_str = '! {nick} {event} "{arg[0]}"'
         elif eventtype in ['kick']:
-            return '! {nick} {event} {arg[0]} ({arg[1]})'
+            format_str = '! {nick} {event} {arg[0]} ({arg[1]})'
         elif eventtype in ['mode']:
-            return '! {nick} {event} {args}'
+            format_str = '! {nick} {event} {args}'
         elif eventtype in ['part', 'quit']:
-            return '! {nick} {event} "{args}"'
-        return '! {nick} {event} {args}'
+            format_str = '! {nick} {event} "{args}"'
+        else:
+            format_str = '! {nick} {event} {args}'
+        return format_str.format(
+            rnick=network.decode(self.repr_nickname(nickname,
+                network.get_channel(event.target()))),
+            nick=network.decode(nickname),
+            event=eventtype,
+            arg=arg,
+            args=' '.join(arg))
 
     def handle_private_event(self, bot, event):
+        """handle private message (i.e. query)"""
         network = bot.network
         nickname = irclib.nm_to_n(event.source() or b'')
         if network.is_one_of_us(nickname):
             return False
-        nickname = network.decode(nickname)
         eventtype = event.eventtype().lower()
         assert isinstance(eventtype, str)
         if eventtype not in ['privmsg']:
@@ -342,15 +279,16 @@ class StandardPipe():
         return False
 
     def handle_who(self, bot, event, arg):
+        """show who information of the other sides.
+        Usage: /msg uniko \who channel
+               channel -- channel name (as seen from the user)
+        """
         arg = irclib.irc_lower(arg.strip())
         if not self.check_channel(bot, arg):
             return False
         network = bot.network
-        channel = network.decode(arg)
-        channel_obj = network.get_channel(channel)
+        channel_obj = network.get_channel(network.decode(arg))
         nickname = irclib.nm_to_n(event.source() or b'')
-#        if not channel_there.is_secret():
-#            return False
         if not channel_obj.has_user(nickname):
             return False
         for t_network in self.networks:
@@ -362,20 +300,21 @@ class StandardPipe():
                 continue
             count = len(t_channel_obj.users())
             nicklist = t_network.decode(self.repr_nicklist(t_channel_obj))
-            msg = 'Total {0} in {1}: {2}'.format(count, t_channel, nicklist)
+            msg = "Total {n} in {network}'s {channel}: {nicklist}".format(
+                n=count,
+                network=t_network.name,
+                channel=t_channel,
+                nicklist=nicklist)
             msg = network.encode(msg)
-            message = Message(
+            bot.push_message(Message(
                 command='privmsg',
-                arguments=(nickname, msg)
-            )
-            bot.push_message(message)
+                arguments=(nickname, msg)))
         return True
 
     def handle_whois(self, bot, event, arg):
-        """shows whois information from the other sides.
+        r"""show whois information of the other sides.
         Usage: /msg uniko \whois nickname
-               where nickname is the nickname in each of the networks other
-               than the user is in.
+               nickname -- nickname (as is)
         """
         arg = arg.strip()
         # TODO: asynchronous
@@ -390,18 +329,20 @@ class StandardPipe():
         return False
 
     def handle_aop(self, bot, event, arg):
+        r"""op all unopped member in the channel.
+        Usage: /msg uniko \aop channel
+               channel -- channel name (as seen from the user)
+        """
         arg = irclib.irc_lower(arg.strip())
         if not self.check_channel(bot, arg):
             return False
         network = bot.network
         nickname = irclib.nm_to_n(event.source() or '')
-        channel = network.decode(arg)
         # TODO: asynchronous?
         for t_network in self.networks:
             if t_network == network:
                 continue
-            t_channel = self.channels[t_network]
-            t_channel = t_network.encode(t_channel)
+            t_channel = t_network.encode(self.channels[t_network])
             t_channel_obj = t_network.get_channel(t_channel)
             t_bot = t_network.get_oper(t_channel)
             if not t_bot:
@@ -410,24 +351,27 @@ class StandardPipe():
             members = members.difference(t_channel_obj.opers())
             for _ in util.partition(members.__iter__(), 4): # XXX
                 mode_string = b'+' + b'o' * len(_) + b' ' + b' '.join(_)
-                message = Message(
+                t_bot.push_message(Message(
                     command='mode',
-                    arguments=(t_channel, mode_string)
-                )
-                t_bot.push_message(message)
-            msg = b' '.join(members)
-            msg = network.encode(t_network.decode(msg))
-            message = Message(
+                    arguments=(t_channel, mode_string)))
+            message = network.encode(t_network.decode(b' '.join(members)))
+            bot.push_message(Message(
                 command='privmsg',
-                arguments=(nickname, msg)
-            )
-            bot.push_message(message)
+                arguments=(nickname, message)))
         return True
 
     def check_channel(self, bot, channel):
         """check if the channel should be handled by self."""
         channel = bot.network.decode(irclib.irc_lower(channel))
         return channel == self.channels[bot.network]
+
+    def push_message(self, network, message):
+        """push message into the buffer.
+        Arguments:
+        network -- target network
+        message -- Message instance
+        """
+        self.buffers[network].push(message)
 
     def repr_nickname(self, nickname, channel_obj):
         """format nickname according to its mode given in the channel.
@@ -469,42 +413,54 @@ class StandardPipe():
         ]
         return ' '.join(repr(_) for _ in result)
 
-class UnikoBufferingBot(BufferingBot.BufferingBot):
-    def __init__(self, network_list, nickname, realname,
-                 reconnection_interval=60, use_ssl=False, buffer_timeout=10.0):
-        BufferingBot.BufferingBot.__init__(self, network_list, nickname,
-                                           realname, reconnection_interval,
-                                           use_ssl, buffer_timeout)
-        self.buffer = BufferingBot.MessageBuffer(timeout=buffer_timeout)
-        self.last_tick = 0
+class UnikoBufferingBot(BufferingBot):
+    def __init__(self, network, nickname, realname, reconnection_interval=60,
+                 use_ssl=False, buffer_timeout=10.0):
+        self.ext_buffers = set()
+        self.buffer_iter = iter(self.ext_buffers)
+        self.network = network
+        BufferingBot.__init__(self, network.server_list, nickname, realname,
+                              reconnection_interval, use_ssl, buffer_timeout,
+                              passive=True)
 
     def __lt__(self, bot):
         return hash(self) < hash(bot)
 
-    def set_global_buffer(self, buffer):
-        self.global_buffer = buffer
-
-    def on_tick(self):
-        if not self.connection.is_connected():
-            return
-        self.flood_control()
-
-
     def flood_control(self):
-        if super(UnikoBufferingBot, self).flood_control():
+        if BufferingBot.flood_control(self):
             return True
-        if len(self.global_buffer):
-            print('--- global buffer ---')
-            self.global_buffer._dump()
-            self.pop_buffer(self.global_buffer)
+        buf = self._get_next_buffer()
+        if len(buf):
+            print('--- pipe buffer ---')
+            buf.dump()
+            self.pop_buffer(buf)
             return True
         return False
 
     def push_message(self, message):
-        if message.is_bot_specific():
-            self.buffer.push(message)
-        else:
-            self.global_buffer.push(message)
+        """push message into the buffer.
+        Arguments:
+        message -- Message instance
+        """
+        self.buffer.push(message)
+
+    def add_buffer(self, message_buffer):
+        self.ext_buffers.add(message_buffer)
+
+    def remove_buffer(self, message_buffer):
+        if message_buffer in self.ext_buffers:
+            self.ext_buffers.remove(message_buffer)
+
+    def _get_next_buffer(self):
+        try:
+            buf = next(self.buffer_iter)
+        except StopIteration:
+            self.buffer_iter = iter(self.ext_buffers)
+            buf = next(self.buffer_iter)
+        except RuntimeError:
+            self.buffer_iter = iter(self.ext_buffers)
+            buf = next(self.buffer_iter)
+        return buf
 
 class UnikoBot():
     def __init__(self, config_file_name):
@@ -513,16 +469,23 @@ class UnikoBot():
         self.pipes = []
         self.config_file_name = config_file_name
         self.config_timestamp = self._get_config_time()
-        data = eval(open(config_file_name).read())
         self.version = -1
         self.debug = False
         self.load()
 
     def _get_config_time(self):
+        if not os.access(self.config_file_name, os.F_OK):
+            return -1
         return os.stat(self.config_file_name).st_mtime
 
     def _get_config_data(self):
-        return eval(open(self.config_file_name).read())
+        if not os.access(self.config_file_name, os.R_OK):
+            return None
+        try:
+            return eval(open(self.config_file_name).read())
+        except SyntaxError:
+            traceback.print_exc()
+        return None
 
     def start(self):
         for _ in self.bots.values():
@@ -536,30 +499,31 @@ class UnikoBot():
                     bot.on_tick()
             for pipe in self.pipes:
                 pipe.on_tick()
-            try:
-                if self._get_config_time() > self.config_timestamp:
-                    self.reload()
-            except Exception:
-                traceback.print_exc()
+            if self._get_config_time() > self.config_timestamp:
+                self.reload()
 
     def load(self):
         data = self._get_config_data()
+        if not data:
+            return False
         self.version = data['version']
         self.debug = data.get('debug', False)
         self.load_network(data['network'])
         self.load_bot(data['bot'])
         self.load_pipe(data['pipe'])
+        return True
 
     def reload(self):
         data = self._get_config_data()
-        if self.version >= data['version']:
-            return
+        if not data or self.version >= data['version']:
+            return False
         print("reloading...")
         self.version = data['version']
         self.debug = data.get('debug', False)
         self.reload_network(data['network'])
         self.reload_bot(data['bot'])
         self.reload_pipe(data['pipe'])
+        return True
 
     def reload_network(self, data):
         pass # TODO
@@ -568,10 +532,9 @@ class UnikoBot():
         for network_data in data:
             self.networks[network_data['name']] = Network(
                 network_data['server'],
+                name=network_data['name'],
                 encoding=network_data['encoding'],
-                use_ssl=network_data.get('use_ssl', False),
-                buffer_timeout=network_data.get('buffer_timeout', 10.0)
-            )
+                use_ssl=network_data.get('use_ssl', False))
 
     def reload_bot(self, data):
         pass # TODO
@@ -595,16 +558,15 @@ class UnikoBot():
                 channels=pipe_data['channel'],
                 always=pipe_data.get('always', []),
                 never=pipe_data.get('never', []),
-                weight=pipe_data.get('weight', 1)
-            )
+                weight=pipe_data.get('weight', 1),
+                buffer_timeout=pipe_data.get('buffer_timeout', 10.0))
             for network in pipe_data['network']:
                 for bot in self.bots[network]:
-                    pipe.attach_handler(bot)
+                    pipe.attach_handler(bot, self.networks[network])
             self.pipes.append(pipe)
         # TODO: shed
 
 def main():
-    irclib.DEBUG = 1
     profile = None
     if len(sys.argv) > 1:
         profile = sys.argv[1]
@@ -612,12 +574,10 @@ def main():
         profile = 'config'
     print("Using profile:", profile)
     root_path = os.path.dirname(os.path.abspath(__file__))
-    config_file_name = os.path.join(root_path, '%s.py' % profile)
+    config_file_name = os.path.join(root_path, profile + '.py')
     uniko = UnikoBot(config_file_name)
     uniko.start()
 
 if __name__ == '__main__':
     main()
-
-# vim: ai et ts=4 sts=4 sw=4
 
