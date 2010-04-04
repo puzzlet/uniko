@@ -1,4 +1,6 @@
 import time
+import codecs
+
 def trace(msg):
     print('[%s] %s' % (time.strftime('%m %d %H:%M:%S'), msg))
 
@@ -41,3 +43,12 @@ def periodic(period):
         return new_f
     return decorator
 
+class SafeCodec(codecs.Codec):
+    def __init__(self, encoding):
+        self.codec = codecs.lookup(encoding)
+
+    def encode(self, input):
+        return self.codec.encode(input, 'xmlcharrefreplace')
+
+    def decode(self, input):
+        return self.codec.decode(input, 'replace')

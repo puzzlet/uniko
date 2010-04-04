@@ -9,6 +9,7 @@ But what is the use of threads -- in such a small gizmo?
 import os.path
 import sys
 import time
+import itertools
 import collections
 import traceback
 
@@ -37,13 +38,14 @@ class Network(object):
         """Safely decode the byte string using the network's encoding."""
         return string.decode(self.encoding, 'ignore')
 
-    def add_bot(self, nickname):
+    def add_bot(self, nickname, test_mode=False):
         bot = UnikoBufferingBot(
             self,
-            self.encode(nickname),
-            b'Uniko the bot',
+            nickname=self.encode(nickname),
+            realname=b'Uniko the bot',
 #            reconnection_interval=60,
-            use_ssl=self.use_ssl)
+            use_ssl=self.use_ssl,
+            test_mode=test_mode)
         self.bots.append(bot)
         return bot
 
@@ -111,7 +113,7 @@ class StandardPipe():
                 self.channels[network] = irclib.irc_lower(channels[i])
             else:
                 self.channels[network] = irclib.irc_lower(channels)
-            self.buffers[network] = MessageBuffer(timeout=buffer_timeout)
+            self.buffers[network] = MessageBuffer(timeout=-1)# XXX buffer_timeout)
         self.actions = set([
             'action', 'privmsg', 'privnotice', 'pubmsg', 'pubnotice',
             'kick', 'mode', 'topic',
@@ -166,15 +168,17 @@ class StandardPipe():
             for bot in network.bots:
                 if bot in bot_joined:
                     continue
+                elif not bot.connection.is_connected():
+                    continue
                 elif bot.buffer.has_buffer_by_command('join'):
-                    weight -= 1
+                    weight -= 1 # XXX temporary response
                 elif len(bot.channels) >= 20: # XXX network's channel limit
                     continue
                 else:
                     bot_available.append(bot)
             for _, bot in zip(range(weight), bot_available):
                 bot.push_message(Message(command='join',
-                    arguments=(network.encode(channel), )))
+                    arguments=(channel, )))
 
     def handle(self, bot, event):
         network = bot.network
@@ -214,10 +218,9 @@ class StandardPipe():
         for target_network in self.networks:
             if target_network == network:
                 continue
-            chan = target_network.encode(self.channels[target_network])
             self.push_message(target_network,
                 Message(command='privmsg',
-                    arguments=(chan, target_network.encode(msg))))
+                    arguments=(self.channels[target_network], msg)))
         return True
 
     def format_event(self, bot, event):
@@ -305,10 +308,9 @@ class StandardPipe():
                 network=t_network.name,
                 channel=t_channel,
                 nicklist=nicklist)
-            msg = network.encode(msg)
             bot.push_message(Message(
                 command='privmsg',
-                arguments=(nickname, msg)))
+                arguments=(network.decode(nickname), msg)))
         return True
 
     def handle_whois(self, bot, event, arg):
@@ -351,13 +353,14 @@ class StandardPipe():
             members = members.difference(t_channel_obj.opers())
             for _ in util.partition(members.__iter__(), 4): # XXX
                 mode_string = b'+' + b'o' * len(_) + b' ' + b' '.join(_)
+                mode_string = t_network.decode(mode_string)
                 t_bot.push_message(Message(
                     command='mode',
-                    arguments=(t_channel, mode_string)))
-            message = network.encode(t_network.decode(b' '.join(members)))
+                    arguments=(self.channels[t_network], mode_string)))
+            message = t_network.decode(b' '.join(members))
             bot.push_message(Message(
                 command='privmsg',
-                arguments=(nickname, message)))
+                arguments=(network.decode(nickname), message)))
         return True
 
     def check_channel(self, bot, channel):
@@ -415,13 +418,15 @@ class StandardPipe():
 
 class UnikoBufferingBot(BufferingBot):
     def __init__(self, network, nickname, realname, reconnection_interval=60,
-                 use_ssl=False, buffer_timeout=10.0):
+                 use_ssl=False, buffer_timeout=10.0, test_mode=False):
         self.ext_buffers = set()
-        self.buffer_iter = iter(self.ext_buffers)
+        self.buffer_iter = itertools.cycle(self.ext_buffers)
         self.network = network
-        BufferingBot.__init__(self, network.server_list, nickname, realname,
-                              reconnection_interval, use_ssl, buffer_timeout,
-                              passive=True)
+        self.test_mode = test_mode
+        BufferingBot.__init__(self, network.server_list, nickname,
+            username=b'uniko', realname=b'Uniko the bot',
+            reconnection_interval=reconnection_interval, use_ssl=use_ssl,
+            codec=network, buffer_timeout=buffer_timeout, passive=True)
 
     def __lt__(self, bot):
         return hash(self) < hash(bot)
@@ -430,9 +435,7 @@ class UnikoBufferingBot(BufferingBot):
         if BufferingBot.flood_control(self):
             return True
         buf = self._get_next_buffer()
-        if len(buf):
-            print('--- pipe buffer ---')
-            buf.dump()
+        if buf:
             self.pop_buffer(buf)
             return True
         return False
@@ -446,21 +449,26 @@ class UnikoBufferingBot(BufferingBot):
 
     def add_buffer(self, message_buffer):
         self.ext_buffers.add(message_buffer)
+        self.buffer_iter = itertools.cycle(self.ext_buffers)
 
     def remove_buffer(self, message_buffer):
         if message_buffer in self.ext_buffers:
             self.ext_buffers.remove(message_buffer)
+            self.buffer_iter = itertools.cycle(self.ext_buffers)
 
     def _get_next_buffer(self):
-        try:
-            buf = next(self.buffer_iter)
-        except StopIteration:
-            self.buffer_iter = iter(self.ext_buffers)
-            buf = next(self.buffer_iter)
-        except RuntimeError:
-            self.buffer_iter = iter(self.ext_buffers)
-            buf = next(self.buffer_iter)
-        return buf
+        if not self.ext_buffers:
+            return None
+        return next(self.buffer_iter)
+
+    def process_message(self, message):
+        if self.test_mode:
+            print(time.strftime('%m %d %H:%M:%S'), self.network.name,
+                self.network.decode(self.connection.get_nickname()),
+                message.command, *message.arguments)
+            if message.command not in ['join']:
+                return
+        BufferingBot.process_message(self, message)
 
 class UnikoBot():
     def __init__(self, config_file_name):
@@ -508,6 +516,7 @@ class UnikoBot():
             return False
         self.version = data['version']
         self.debug = data.get('debug', False)
+        self.test_mode = data.get('test', False)
         self.load_network(data['network'])
         self.load_bot(data['bot'])
         self.load_pipe(data['pipe'])
@@ -520,6 +529,7 @@ class UnikoBot():
         print("reloading...")
         self.version = data['version']
         self.debug = data.get('debug', False)
+        self.test_mode = data.get('test', False)
         self.reload_network(data['network'])
         self.reload_bot(data['bot'])
         self.reload_pipe(data['pipe'])
@@ -542,7 +552,8 @@ class UnikoBot():
     def load_bot(self, data):
         for bot_data in data:
             network = self.networks[bot_data['network']]
-            bot = network.add_bot(nickname=bot_data['nickname'])
+            bot = network.add_bot(nickname=bot_data['nickname'],
+                test_mode=self.test_mode)
             self.bots[bot_data['network']].append(bot)
 
     def reload_pipe(self, data):
