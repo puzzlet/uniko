@@ -32,16 +32,18 @@ class Network(object):
 
     def encode(self, string):
         """Safely encode the string using the network's encoding."""
-        return string.encode(self.encoding, 'xmlcharrefreplace')
+        result = string.encode(self.encoding, 'xmlcharrefreplace')
+        return result, len(result)
 
     def decode(self, string):
         """Safely decode the byte string using the network's encoding."""
-        return string.decode(self.encoding, 'ignore')
+        result = string.decode(self.encoding, 'ignore')
+        return result, len(result)
 
     def add_bot(self, nickname, test_mode=False):
         bot = UnikoBufferingBot(
             self,
-            nickname=self.encode(nickname),
+            nickname=self.encode(nickname)[0],
             realname=b'Uniko the bot',
 #            reconnection_interval=60,
             use_ssl=self.use_ssl,
@@ -70,13 +72,13 @@ class Network(object):
 
     def get_bots_by_channel(self, channel):
         if isinstance(channel, str):
-            channel = self.encode(channel)
+            channel = self.encode(channel)[0]
         return [_ for _ in self.bots if channel in _.channels]
 
     def get_channel(self, channel):
         """Return ircbot.Channel instance."""
         if isinstance(channel, str):
-            channel = self.encode(channel)
+            channel = self.encode(channel)[0]
         channel = irclib.irc_lower(channel)
         for bot in self.bots:
             if channel in bot.channels:
@@ -85,7 +87,7 @@ class Network(object):
 
     def get_oper(self, channel):
         if isinstance(channel, str):
-            channel = self.encode(channel)
+            channel = self.encode(channel)[0]
         for bot in self.bots:
             if channel not in bot.channels:
                 continue
@@ -228,7 +230,7 @@ class StandardPipe():
         eventtype = event.eventtype().lower()
         assert isinstance(eventtype, str)
         nickname = irclib.nm_to_n(event.source() or '')
-        arg = [network.decode(_) for _ in event.arguments()]
+        arg = [network.decode(_)[0] for _ in event.arguments()]
         if eventtype in ['privmsg', 'pubmsg']:
             format_str = '<{rnick}> {arg[0]}'
         elif eventtype in ['privnotice', 'pubnotice']:
@@ -249,8 +251,8 @@ class StandardPipe():
             format_str = '! {nick} {event} {args}'
         return format_str.format(
             rnick=network.decode(self.repr_nickname(nickname,
-                network.get_channel(event.target()))),
-            nick=network.decode(nickname),
+                network.get_channel(event.target())))[0],
+            nick=network.decode(nickname)[0],
             event=eventtype,
             arg=arg,
             args=' '.join(arg))
@@ -290,7 +292,7 @@ class StandardPipe():
         if not self.check_channel(bot, arg):
             return False
         network = bot.network
-        channel_obj = network.get_channel(network.decode(arg))
+        channel_obj = network.get_channel(network.decode(arg)[0])
         nickname = irclib.nm_to_n(event.source() or b'')
         if not channel_obj.has_user(nickname):
             return False
@@ -298,11 +300,11 @@ class StandardPipe():
             if t_network == network:
                 continue
             t_channel = self.channels[t_network]
-            t_channel_obj = t_network.get_channel(t_network.encode(t_channel))
+            t_channel_obj = t_network.get_channel(t_network.encode(t_channel)[0])
             if t_channel_obj is None:
                 continue
             count = len(t_channel_obj.users())
-            nicklist = t_network.decode(self.repr_nicklist(t_channel_obj))
+            nicklist = t_network.decode(self.repr_nicklist(t_channel_obj))[0]
             msg = "Total {n} in {network}'s {channel}: {nicklist}".format(
                 n=count,
                 network=t_network.name,
@@ -310,7 +312,7 @@ class StandardPipe():
                 nicklist=nicklist)
             bot.push_message(Message(
                 command='privmsg',
-                arguments=(network.decode(nickname), msg)))
+                arguments=(network.decode(nickname)[0], msg)))
         return True
 
     def handle_whois(self, bot, event, arg):
@@ -344,7 +346,7 @@ class StandardPipe():
         for t_network in self.networks:
             if t_network == network:
                 continue
-            t_channel = t_network.encode(self.channels[t_network])
+            t_channel = t_network.encode(self.channels[t_network])[0]
             t_channel_obj = t_network.get_channel(t_channel)
             t_bot = t_network.get_oper(t_channel)
             if not t_bot:
@@ -353,19 +355,19 @@ class StandardPipe():
             members = members.difference(t_channel_obj.opers())
             for _ in util.partition(members.__iter__(), 4): # XXX
                 mode_string = b'+' + b'o' * len(_) + b' ' + b' '.join(_)
-                mode_string = t_network.decode(mode_string)
+                mode_string = t_network.decode(mode_string)[0]
                 t_bot.push_message(Message(
                     command='mode',
                     arguments=(self.channels[t_network], mode_string)))
-            message = t_network.decode(b' '.join(members))
+            message = t_network.decode(b' '.join(members)[0])
             bot.push_message(Message(
                 command='privmsg',
-                arguments=(network.decode(nickname), message)))
+                arguments=(network.decode(nickname)[0], message)))
         return True
 
     def check_channel(self, bot, channel):
         """check if the channel should be handled by self."""
-        channel = bot.network.decode(irclib.irc_lower(channel))
+        channel = bot.network.decode(irclib.irc_lower(channel))[0]
         return channel == self.channels[bot.network]
 
     def push_message(self, network, message):
@@ -464,7 +466,7 @@ class UnikoBufferingBot(BufferingBot):
     def process_message(self, message):
         if self.test_mode:
             print(time.strftime('%m %d %H:%M:%S'), self.network.name,
-                self.network.decode(self.connection.get_nickname()),
+                self.network.decode(self.connection.get_nickname()[0]),
                 message.command, *message.arguments)
             if message.command not in ['join']:
                 return
