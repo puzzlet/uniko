@@ -157,8 +157,8 @@ class StandardPipe():
         self._sync_weight(tick)
 
     def _sync_weight(self, tick):
-        """should only be called by self.on_tick()"""
-        if self.join_tick + 2 > tick:
+        """should only be called from self.on_tick()"""
+        if self.join_tick + 10 > tick:
             return
         self.join_tick = time.time()
         for network, channel in self.channels.items():
@@ -178,7 +178,9 @@ class StandardPipe():
                     continue
                 else:
                     bot_available.append(bot)
-            for _, bot in zip(range(weight), bot_available):
+            for i, bot in enumerate(bot_available):
+                if i >= weight:
+                    break
                 bot.push_message(Message(command='join',
                     arguments=(channel, )))
 
@@ -466,7 +468,7 @@ class UnikoBufferingBot(BufferingBot):
     def process_message(self, message):
         if self.test_mode:
             print(time.strftime('%m %d %H:%M:%S'), self.network.name,
-                self.network.decode(self.connection.get_nickname()[0]),
+                self.network.decode(self.connection.get_nickname())[0],
                 message.command, *message.arguments)
             if message.command not in ['join']:
                 return
