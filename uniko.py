@@ -115,7 +115,7 @@ class StandardPipe():
                 self.channels[network] = irclib.irc_lower(channels[i])
             else:
                 self.channels[network] = irclib.irc_lower(channels)
-            self.buffers[network] = MessageBuffer(timeout=-1)# XXX buffer_timeout)
+            self.buffers[network] = MessageBuffer(timeout=buffer_timeout)
         self.actions = set([
             'action', 'privmsg', 'privnotice', 'pubmsg', 'pubnotice',
             'kick', 'mode', 'topic',
@@ -130,25 +130,17 @@ class StandardPipe():
         self.handler_function = {}
         self.join_tick = 0
 
-    def attach_handler(self, bot, network):
+    def attach_bot(self, bot, network):
         def _handler(_, event):
-            self.handle(bot, event)
+            return self.handle(bot, event)
         self.handler_function[bot] = _handler
         self.bots.append(bot)
         for action in self.actions:
-            if action in ['nick', 'quit']:
-                # bot.channels is updated at priority -10, hence -11
-                priority = -11
-            else:
-                priority = 0
-            bot.connection.add_global_handler(action, _handler, priority)
+            bot.attach_handler(action, _handler)
         bot.add_buffer(self.buffers[network])
 
     def detach_all_handler(self):
         for bot in self.bots:
-            for action in self.actions:
-                bot.connection.remove_global_handler(action,
-                    self.handler_function[bot])
             for network in self.networks:
                 bot.remove_buffer(self.buffers[network])
 
@@ -172,7 +164,7 @@ class StandardPipe():
                     continue
                 elif not bot.connection.is_connected():
                     continue
-                elif bot.buffer.has_buffer_by_command('join'):
+                elif bot.message_buffer.has_buffer_by_command('join'):
                     weight -= 1 # XXX temporary response
                 elif len(bot.channels) >= 20: # XXX network's channel limit
                     continue
@@ -189,6 +181,7 @@ class StandardPipe():
         if network not in self.networks:
             return
         target = event.target()
+        handled = False
         try:
             if irclib.is_channel(target):
                 handled = self.handle_channel_event(bot, event)
@@ -196,7 +189,7 @@ class StandardPipe():
                 handled = self.handle_private_event(bot, event)
         except Exception:
             traceback.print_exc()
-            handled = False
+        return handled
 
     def handle_channel_event(self, bot, event):
         network = bot.network
@@ -431,6 +424,8 @@ class UnikoBufferingBot(BufferingBot):
             username=b'uniko', realname=b'Uniko the bot',
             reconnection_interval=reconnection_interval, use_ssl=use_ssl,
             codec=network, buffer_timeout=buffer_timeout, passive=True)
+        self.handlers = {}
+        self.handler_wrapper = {}
 
     def __lt__(self, bot):
         return hash(self) < hash(bot)
@@ -438,18 +433,51 @@ class UnikoBufferingBot(BufferingBot):
     def flood_control(self):
         if BufferingBot.flood_control(self):
             return True
-        buf = self._get_next_buffer()
+        buf = self._get_earliest_buffer()
         if buf:
             self.pop_buffer(buf)
             return True
         return False
+
+    def attach_handler(self, action, handler):
+        if action in self.handlers:
+            self.handlers[action].append(handler)
+            return
+        def wrapper(_, event):
+            result = any(handler(_, event) for handler in self.handlers[action])
+            if not result:
+                message = [
+                    'Unhandled message from %s.%s:'.format(
+                        self.network, self.connection.get_nickname()
+                    ),
+                    self.network.decode(event.source() or b'')[0],
+                    self.network.decode(event.target() or b'')[0],
+                    event.eventtype(),
+                ]
+                for arg in event.arguments():
+                    message.append(self.network.decode(arg)[0])
+                print(' '.join(message))
+        self.handlers[action] = [handler]
+        self.handler_wrapper[action] = wrapper
+        if action in ['nick', 'quit']:
+            # bot.channels is updated at priority -10, hence -11
+            priority = -11
+        else:
+            priority = 0
+        self.connection.add_global_handler(action, wrapper, priority)
+
+    def detach_all_handler(self):
+        for action, wrapper in self.handler_wrapper.items():
+            self.connection.remove_global_handler(action, wrapper)
+        self.handler_wrapper = {}
+        self.handlers = {}
 
     def push_message(self, message):
         """push message into the buffer.
         Arguments:
         message -- Message instance
         """
-        self.buffer.push(message)
+        self.message_buffer.push(message)
 
     def add_buffer(self, message_buffer):
         self.ext_buffers.add(message_buffer)
@@ -460,10 +488,15 @@ class UnikoBufferingBot(BufferingBot):
             self.ext_buffers.remove(message_buffer)
             self.buffer_iter = itertools.cycle(self.ext_buffers)
 
-    def _get_next_buffer(self):
+    def _get_earliest_buffer(self):
         if not self.ext_buffers:
             return None
-        return next(self.buffer_iter)
+        def key(message_buffer):
+            message = message_buffer.peek()
+            if message:
+                return message.timestamp
+            return float('infinity')
+        return min(self.ext_buffers, key=key)
 
     def process_message(self, message):
         if self.test_mode:
@@ -561,6 +594,9 @@ class UnikoBot():
             self.bots[bot_data['network']].append(bot)
 
     def reload_pipe(self, data):
+        for network, bots in self.bots.items():
+            for bot in bots:
+                bot.detach_all_handler()
         while self.pipes:
             pipe = self.pipes.pop()
             pipe.detach_all_handler()
@@ -577,7 +613,7 @@ class UnikoBot():
                 buffer_timeout=pipe_data.get('buffer_timeout', 10.0))
             for network in pipe_data['network']:
                 for bot in self.bots[network]:
-                    pipe.attach_handler(bot, self.networks[network])
+                    pipe.attach_bot(bot, self.networks[network])
             self.pipes.append(pipe)
         # TODO: shed
 
