@@ -139,7 +139,7 @@ class StandardPipe():
             bot.attach_handler(action, _handler)
         bot.add_buffer(self.buffers[network])
 
-    def detach_all_handler(self):
+    def detach_all_handlers(self):
         for bot in self.bots:
             for network in self.networks:
                 bot.remove_buffer(self.buffers[network])
@@ -417,7 +417,6 @@ class UnikoBufferingBot(BufferingBot):
     def __init__(self, network, nickname, realname, reconnection_interval=60,
                  use_ssl=False, buffer_timeout=10.0, test_mode=False):
         self.ext_buffers = set()
-        self.buffer_iter = itertools.cycle(self.ext_buffers)
         self.network = network
         self.test_mode = test_mode
         BufferingBot.__init__(self, network.server_list, nickname,
@@ -433,11 +432,10 @@ class UnikoBufferingBot(BufferingBot):
     def flood_control(self):
         if BufferingBot.flood_control(self):
             return True
-        buf = self._get_earliest_buffer()
-        if buf:
-            self.pop_buffer(buf)
-            return True
-        return False
+        if not self.ext_buffers:
+            return False
+        self.pop_buffer(min(self.ext_buffers))
+        return True
 
     def attach_handler(self, action, handler):
         if action in self.handlers:
@@ -447,9 +445,8 @@ class UnikoBufferingBot(BufferingBot):
             result = any(handler(_, event) for handler in self.handlers[action])
             if not result:
                 message = [
-                    'Unhandled message from %s.%s:'.format(
-                        self.network, self.connection.get_nickname()
-                    ),
+                    'Unhandled message from {}.{}:'.format(
+                        self.network.name, self.connection.get_nickname()),
                     self.network.decode(event.source() or b'')[0],
                     self.network.decode(event.target() or b'')[0],
                     event.eventtype(),
@@ -466,37 +463,18 @@ class UnikoBufferingBot(BufferingBot):
             priority = 0
         self.connection.add_global_handler(action, wrapper, priority)
 
-    def detach_all_handler(self):
+    def detach_all_handlers(self):
         for action, wrapper in self.handler_wrapper.items():
             self.connection.remove_global_handler(action, wrapper)
         self.handler_wrapper = {}
         self.handlers = {}
 
-    def push_message(self, message):
-        """push message into the buffer.
-        Arguments:
-        message -- Message instance
-        """
-        self.message_buffer.push(message)
-
     def add_buffer(self, message_buffer):
         self.ext_buffers.add(message_buffer)
-        self.buffer_iter = itertools.cycle(self.ext_buffers)
 
     def remove_buffer(self, message_buffer):
         if message_buffer in self.ext_buffers:
             self.ext_buffers.remove(message_buffer)
-            self.buffer_iter = itertools.cycle(self.ext_buffers)
-
-    def _get_earliest_buffer(self):
-        if not self.ext_buffers:
-            return None
-        def key(message_buffer):
-            message = message_buffer.peek()
-            if message:
-                return message.timestamp
-            return float('infinity')
-        return min(self.ext_buffers, key=key)
 
     def process_message(self, message):
         if self.test_mode:
@@ -596,10 +574,11 @@ class UnikoBot():
     def reload_pipe(self, data):
         for network, bots in self.bots.items():
             for bot in bots:
-                bot.detach_all_handler()
+                bot.detach_all_handlers()
         while self.pipes:
             pipe = self.pipes.pop()
-            pipe.detach_all_handler()
+            pipe.detach_all_handlers()
+        self.pipes = []
         self.load_pipe(data)
 
     def load_pipe(self, data):
