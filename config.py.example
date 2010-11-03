@@ -32,9 +32,13 @@
         { 'network': 'freenode', 'nickname': 'uniko2', },
     ],
     'pipe': [
-        { 'network': ['hanirc', 'freenode'], 'channel': u'#uniko', },
-        { 'network': ['hanirc', 'freenode'], 'channel': u'#uniko-multiple', 'weight': 2, },
-        { 'network': ['hanirc', 'freenode'], 'channel': [u'#uniko-hanirc', u'#uniko-freenode', ], },
+        { 'network': ['hanirc', 'freenode'], 'channel': '#uniko', },
+        { 'network': ['hanirc', 'freenode'], 'channel': '#uniko-multiple', 'weight': 2, },
+        {
+            'network': ['hanirc', 'freenode'],
+            'channel': ['#uniko-hanirc', '#uniko-freenode', ],
+            'password': [b'channel-password1', b'channel-password2', ],
+        },
     ],
 
 }

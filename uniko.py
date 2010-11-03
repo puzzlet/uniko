@@ -97,24 +97,31 @@ class Network(object):
         return None
 
 class StandardPipe():
-    def __init__(self, networks, channels, always=None, never=None, weight=1,
-                 buffer_timeout=10.0):
+    def __init__(self, networks, channels, passwords=[], always=None, never=None,
+                weight=1, buffer_timeout=10.0, debug=False):
         """
         networks -- list of networks
         channels -- either string or a list of strings.
                     the length of the list must equal to the length of networks
         """
         self.networks = networks
+        self.debug = debug
         self.bots = []
         self.channels = {}
+        self.passwords = {}
         self.buffers = {}
         for i, network in enumerate(networks):
             if isinstance(channels, (list, tuple)):
-                if not channels[i]: # allow to be None
+                if not channels[i]: # allow None
                     continue
                 self.channels[network] = irclib.irc_lower(channels[i])
+                if not passwords or not passwords[i]: # allow None
+                    continue
+                self.passwords[network] = passwords[i]
             else:
                 self.channels[network] = irclib.irc_lower(channels)
+                if passwords:
+                    self.passwords[network] = passwords
             self.buffers[network] = MessageBuffer(timeout=buffer_timeout)
         self.actions = set([
             'action', 'privmsg', 'privnotice', 'pubmsg', 'pubnotice',
@@ -154,6 +161,7 @@ class StandardPipe():
             return
         self.join_tick = time.time()
         for network, channel in self.channels.items():
+            password = self.passwords.get(network, b'')
             bot_joined = network.get_bots_by_channel(channel)
             weight = self.weight - len(bot_joined)
             if weight <= 0:
@@ -174,7 +182,7 @@ class StandardPipe():
                 if i >= weight:
                     break
                 bot.push_message(Message(command='join',
-                    arguments=(channel, )))
+                    arguments=(channel, password)))
 
     def handle(self, bot, event):
         network = bot.network
@@ -190,6 +198,12 @@ class StandardPipe():
         except Exception:
             traceback.print_exc()
         return handled
+        if not handled and self.debug:
+            print('Unhandled message:', event.source(), event.target(),
+                event.eventtype(), event.arguments())
+#                bot.network.decode(event.target() or '')[0],
+#                bot.network.decode(event.source() or '')[0],
+#                bot.network.decode(event.arguments() or '')[0])
 
     def handle_channel_event(self, bot, event):
         network = bot.network
@@ -586,10 +600,12 @@ class UnikoBot():
             networks = [self.networks[_] for _ in pipe_data['network']]
             pipe = StandardPipe(networks=networks,
                 channels=pipe_data['channel'],
+                passwords=pipe_data.get('password', []),
                 always=pipe_data.get('always', []),
                 never=pipe_data.get('never', []),
                 weight=pipe_data.get('weight', 1),
-                buffer_timeout=pipe_data.get('buffer_timeout', 10.0))
+                buffer_timeout=pipe_data.get('buffer_timeout', 10.0),
+                debug=self.debug)
             for network in pipe_data['network']:
                 for bot in self.bots[network]:
                     pipe.attach_bot(bot, self.networks[network])
