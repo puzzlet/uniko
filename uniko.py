@@ -73,7 +73,12 @@ class Network(object):
     def get_bots_by_channel(self, channel):
         if isinstance(channel, str):
             channel = self.encode(channel)[0]
-        return [_ for _ in self.bots if channel in _.channels]
+        channel = irclib.irc_lower(channel)
+        bots = []
+        for bot in self.bots:
+            if channel in [irclib.irc_lower(_) for _ in bot.channels]:
+                bots.append(bot)
+        return bots
 
     def get_channel(self, channel):
         """Return ircbot.Channel instance."""
@@ -161,7 +166,7 @@ class StandardPipe():
             return
         self.join_tick = time.time()
         for network, channel in self.channels.items():
-            password = self.passwords.get(network, b'')
+            password = self.passwords.get(network, '')
             bot_joined = network.get_bots_by_channel(channel)
             weight = self.weight - len(bot_joined)
             if weight <= 0:
