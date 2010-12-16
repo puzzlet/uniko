@@ -101,9 +101,10 @@ class Network(object):
                 return bot
         return None
 
-class StandardPipe():
-    def __init__(self, networks, channels, passwords=[], always=None, never=None,
-                weight=1, buffer_timeout=10.0, debug=False):
+class StandardPipe:
+    def __init__(self, networks, channels, passwords=[],
+                 always=None, never=None,
+                 weight=1, buffer_timeout=10.0, debug=False):
         """
         networks -- list of networks
         channels -- either string or a list of strings.
@@ -116,6 +117,7 @@ class StandardPipe():
         self.passwords = {}
         self.buffers = {}
         for i, network in enumerate(networks):
+            self.buffers[network] = MessageBuffer(timeout=buffer_timeout)
             if isinstance(channels, (list, tuple)):
                 if not channels[i]: # allow None
                     continue
@@ -127,7 +129,6 @@ class StandardPipe():
                 self.channels[network] = irclib.irc_lower(channels)
                 if passwords:
                     self.passwords[network] = passwords
-            self.buffers[network] = MessageBuffer(timeout=buffer_timeout)
         self.actions = set([
             'action', 'privmsg', 'privnotice', 'pubmsg', 'pubnotice',
             'kick', 'mode', 'topic',
