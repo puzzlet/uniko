@@ -16,6 +16,8 @@ import traceback
 import irclib
 from BufferingBot import Message, MessageBuffer, BufferingBot
 
+import formatter
+import formatter.standard
 import util
 
 class Network(object):
@@ -102,8 +104,9 @@ class Network(object):
         return None
 
 class StandardPipe:
-    def __init__(self, networks, channels, passwords=[],
-                 always=None, never=None,
+    def __init__(self, networks, channels, passwords=None,
+                 disabled=None, always=None, never=None,
+                 formatter_='standard',
                  weight=1, buffer_timeout=10.0, debug=False):
         """
         networks -- list of networks
@@ -116,12 +119,16 @@ class StandardPipe:
         self.channels = {}
         self.passwords = {}
         self.buffers = {}
+        self.disabled = {}
+        self.formatter = formatter.load(formatter_)
         for i, network in enumerate(networks):
             self.buffers[network] = MessageBuffer(timeout=buffer_timeout)
             if isinstance(channels, (list, tuple)):
                 if not channels[i]: # allow None
                     continue
                 self.channels[network] = irclib.irc_lower(channels[i])
+                if disabled:
+                    self.disabled[network] = disabled[i]
                 if not passwords or not passwords[i]: # allow None
                     continue
                 self.passwords[network] = passwords[i]
@@ -129,6 +136,7 @@ class StandardPipe:
                 self.channels[network] = irclib.irc_lower(channels)
                 if passwords:
                     self.passwords[network] = passwords
+                self.buffers[network].disabled = disabled
         self.actions = set([
             'action', 'privmsg', 'privnotice', 'pubmsg', 'pubnotice',
             'kick', 'mode', 'topic',
@@ -153,7 +161,9 @@ class StandardPipe:
         bot.add_buffer(self.buffers[network])
 
     def detach_all_handlers(self):
-        for bot in self.bots:
+        while self.bots:
+            bot = self.bots.pop()
+            bot.detach_handler(self.handler_function[bot])
             for network in self.networks:
                 bot.remove_buffer(self.buffers[network])
 
@@ -229,7 +239,7 @@ class StandardPipe:
             modes = irclib.parse_channel_modes(b' '.join(event.arguments()))
             if all(_[0] == b'+' and _[1] in b'ov' for _ in modes):
                 return False
-        msg = self.format_event(bot, event)
+        msg = self.formatter(event, network.get_channel(event.target()), network.encoding)
         if not msg:
             return False
         for target_network in self.networks:
@@ -240,41 +250,11 @@ class StandardPipe:
                     arguments=(self.channels[target_network], msg)))
         return True
 
-    def format_event(self, bot, event):
-        network = bot.network
-        eventtype = event.eventtype().lower()
-        assert isinstance(eventtype, str)
-        nickname = irclib.nm_to_n(event.source() or '')
-        arg = [network.decode(_)[0] for _ in event.arguments()]
-        if eventtype in ['privmsg', 'pubmsg']:
-            format_str = '<{rnick}> {arg[0]}'
-        elif eventtype in ['privnotice', 'pubnotice']:
-            format_str = '>{rnick}< {arg[0]}'
-        elif eventtype in ['action']:
-            format_str = '\x02* {nick}\x02 {args}'
-        elif eventtype in ['join']:
-            format_str = '! {nick} {event}'
-        elif eventtype in ['topic']:
-            format_str = '! {nick} {event} "{arg[0]}"'
-        elif eventtype in ['kick']:
-            format_str = '! {nick} {event} {arg[0]} ({arg[1]})'
-        elif eventtype in ['mode']:
-            format_str = '! {nick} {event} {args}'
-        elif eventtype in ['part', 'quit']:
-            format_str = '! {nick} {event} "{args}"'
-        else:
-            format_str = '! {nick} {event} {args}'
-        return format_str.format(
-            rnick=network.decode(self.repr_nickname(nickname,
-                network.get_channel(event.target())))[0],
-            nick=network.decode(nickname)[0],
-            event=eventtype,
-            arg=arg,
-            args=' '.join(arg))
-
     def handle_private_event(self, bot, event):
         """handle private message (i.e. query)"""
         network = bot.network
+        if self.disabled.get(network, False):
+            return False
         nickname = irclib.nm_to_n(event.source() or b'')
         if network.is_one_of_us(nickname):
             return False
@@ -391,30 +371,16 @@ class StandardPipe:
         network -- target network
         message -- Message instance
         """
+        if self.disabled.get(network, False):
+            return
         self.buffers[network].push(message)
-
-    def repr_nickname(self, nickname, channel_obj):
-        """format nickname according to its mode given in the channel.
-        Arguments:
-        nickname -- nickname in bytes
-        channel_obj -- ircbot.Channel instance
-        """
-        assert isinstance(nickname, bytes)
-        if not channel_obj:
-            return nickname
-        # TODO: halfop and all the other modes
-        elif channel_obj.is_oper(nickname):
-            return b'@' + nickname
-        elif channel_obj.is_voiced(nickname):
-            return b'+' + nickname
-        return b' ' + nickname
 
     def repr_nicklist(self, channel_obj):
         """format the channel's member list into following order:
         opers, voiced, others
         each of them alphabetized
         """
-        # TODO: halfop and all the other modes
+        # TODO: halfop and any other mode
         def key(nickname):
             weight = \
                 100 if channel_obj.is_oper(nickname) else \
@@ -422,7 +388,8 @@ class StandardPipe:
                 1
             return weight, irclib.irc_lower(nickname)
         members = sorted(channel_obj.users(), key=key)
-        return b' '.join(self.repr_nickname(_, channel_obj) for _ in members)
+        return b' '.join(formatter.standard.repr_nickname(_, channel_obj) \
+            for _ in members)
 
     def repr_event(self, event):
         result = [
@@ -482,6 +449,11 @@ class UnikoBufferingBot(BufferingBot):
         else:
             priority = 0
         self.connection.add_global_handler(action, wrapper, priority)
+
+    def detach_handler(self, handler):
+        for action, handlers in self.handlers.items():
+            if handler in handlers:
+                handlers.remove(handler)
 
     def detach_all_handlers(self):
         for action, wrapper in self.handler_wrapper.items():
@@ -607,8 +579,10 @@ class UnikoBot():
             pipe = StandardPipe(networks=networks,
                 channels=pipe_data['channel'],
                 passwords=pipe_data.get('password', []),
+                disabled=pipe_data.get('disabled', []),
                 always=pipe_data.get('always', []),
                 never=pipe_data.get('never', []),
+                formatter_=pipe_data.get('formatter', 'standard'),
                 weight=pipe_data.get('weight', 1),
                 buffer_timeout=pipe_data.get('buffer_timeout', 10.0),
                 debug=self.debug)
