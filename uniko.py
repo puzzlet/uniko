@@ -11,6 +11,7 @@ import sys
 import time
 import itertools
 import collections
+import logging
 import traceback
 
 import irclib
@@ -47,7 +48,7 @@ class Network(object):
             self,
             nickname=self.encode(nickname)[0],
             realname=b'Uniko the bot',
-#            reconnection_interval=60,
+            reconnection_interval=600,
             use_ssl=self.use_ssl,
             test_mode=test_mode)
         self.bots.append(bot)
@@ -212,7 +213,7 @@ class StandardPipe:
             else:
                 handled = self.handle_private_event(bot, event)
         except Exception:
-            traceback.print_exc()
+            logging.exception('')
         return handled
         if not handled and self.debug:
             print('Unhandled message:', event.source(), event.target(),
@@ -375,12 +376,28 @@ class StandardPipe:
             return
         self.buffers[network].push(message)
 
+    def repr_nickname(self, nickname, channel_obj):
+        """format nickname according to its mode given in the channel.
+        Arguments:
+        nickname -- nickname in bytes
+        channel_obj -- ircbot.Channel instance
+        """
+        assert isinstance(nickname, bytes)
+        if not channel_obj:
+            return nickname
+        # TODO: halfop and any other modes
+        elif channel_obj.is_oper(nickname):
+            return b'@' + nickname
+        elif channel_obj.is_voiced(nickname):
+            return b'+' + nickname
+        return b' ' + nickname
+
     def repr_nicklist(self, channel_obj):
         """format the channel's member list into following order:
         opers, voiced, others
         each of them alphabetized
         """
-        # TODO: halfop and any other mode
+        # TODO: halfop and any other modes
         def key(nickname):
             weight = \
                 100 if channel_obj.is_oper(nickname) else \
@@ -440,7 +457,7 @@ class UnikoBufferingBot(BufferingBot):
                 ]
                 for arg in event.arguments():
                     message.append(self.network.decode(arg)[0])
-                print(' '.join(message))
+                logging.info(' '.join(message))
         self.handlers[action] = [handler]
         self.handler_wrapper[action] = wrapper
         if action in ['nick', 'quit']:
@@ -470,7 +487,7 @@ class UnikoBufferingBot(BufferingBot):
 
     def process_message(self, message):
         if self.test_mode:
-            print(time.strftime('%m %d %H:%M:%S'), self.network.name,
+            logging.info(time.strftime('%m %d %H:%M:%S'), self.network.name,
                 self.network.decode(self.connection.get_nickname())[0],
                 message.command, *message.arguments)
             if message.command not in ['join']:
@@ -499,13 +516,13 @@ class UnikoBot():
         try:
             return eval(open(self.config_file_name).read())
         except SyntaxError:
-            traceback.print_exc()
+            logging.exception('while parsing config data')
         return None
 
     def start(self):
         for _ in self.bots.values():
             for bot in _:
-                print('{0._nickname} connecting to {0.server_list}'.format(bot))
+                logging.info('{0._nickname} connecting to {0.server_list}'.format(bot))
                 bot._connect()
         while True:
             for _ in self.bots.values():
@@ -533,7 +550,7 @@ class UnikoBot():
         data = self._get_config_data()
         if not data or self.version >= data['version']:
             return False
-        print("reloading...")
+        logging.info("reloading...")
         self.version = data['version']
         self.debug = data.get('debug', False)
         self.test_mode = data.get('test', False)
@@ -593,12 +610,13 @@ class UnikoBot():
         # TODO: shed
 
 def main():
+    logging.basicConfig(level=logging.INFO)
     profile = None
     if len(sys.argv) > 1:
         profile = sys.argv[1]
     if not profile:
         profile = 'config'
-    print("Using profile:", profile)
+    logging.info("Using profile:", profile)
     root_path = os.path.dirname(os.path.abspath(__file__))
     config_file_name = os.path.join(root_path, profile + '.py')
     uniko = UnikoBot(config_file_name)
